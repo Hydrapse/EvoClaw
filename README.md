@@ -139,7 +139,9 @@ A helper script is provided to automate this for all repositories:
 ### Run an E2E Trial (Full Session)
 
 ```bash
-python -m harness.e2e.run_e2e \
+export UNIFIED_BASE_URL="https://llm-proxy.example.com/v1" && \
+  export UNIFIED_API_KEY="sk-..." && \
+  python -m harness.e2e.run_e2e \
     --repo-name navidrome_navidrome_v0.57.0_v0.58.0 \
     --image navidrome_navidrome_v0.57.0_v0.58.0/base:latest \
     --srs-root /path/to/workspace/srs \
