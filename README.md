@@ -1,4 +1,4 @@
-# DevEvol
+# EvoClaw
 
 **End-to-End Evaluation Harness for AI Coding Agents on Real-World Software Evolution**
 
