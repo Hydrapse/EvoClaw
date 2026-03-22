@@ -17,7 +17,7 @@ trial_name: my_experiment
 agent: claude-code
 
 # Model identifier
-model: claude-sonnet-4-5-20250929
+model: claude-sonnet-4-6
 
 # Max agent runtime per repo (seconds)
 timeout: 18000
@@ -25,10 +25,6 @@ timeout: 18000
 # Reasoning effort: low | medium | high | xhigh | max
 # Controls the model's thinking depth. Not all agents/models support this.
 # reasoning_effort: high
-
-# Environment variables for model API access:
-#   export UNIFIED_API_KEY=sk-...
-#   export UNIFIED_BASE_URL=https://...    # optional, for proxy or custom endpoints
 
 # ─── Optional ───────────────────────────────────────────
 
