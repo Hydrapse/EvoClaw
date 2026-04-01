@@ -211,7 +211,7 @@ python -m harness.e2e.evaluator \
 
 ## Configuration
 
-The `e2e_config.yaml` (at `harness/e2e/e2e_config.yaml`) controls evaluation behavior. The default configuration is tuned for the EvoClaw Benchmark:
+The `e2e_config.yaml` (at `harness/e2e/e2e_config.yaml`) controls evaluation behavior. The default configuration is used for the EvoClaw Benchmark:
 
 ```yaml
 dag_unlock:
