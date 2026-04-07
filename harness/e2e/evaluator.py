@@ -1653,6 +1653,11 @@ Example:
             json.dump(result.to_dict(), f, indent=2)
         print(f"\nResults saved to: {args.output}")
 
+        # Generate filtered evaluation if filter_list exists
+        filtered_path = generate_filtered_evaluation(args.output, args.workspace_root, args.milestone_id)
+        if filtered_path:
+            print(f"Filtered results saved to: {filtered_path}")
+
         # Exit with appropriate code
         sys.exit(0 if result.resolved else 1)
 
