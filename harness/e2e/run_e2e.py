@@ -1106,7 +1106,7 @@ class E2ETrialRunner:
             timeout_ms=self.timeout_ms,
             prompt_version=self.prompt_version,
             reasoning_effort=self.reasoning_effort,
-            drop_params=self.orchestrator.drop_params,
+            api_router=self.orchestrator.api_router,
         )
 
         # Capture initial state
@@ -1343,25 +1343,11 @@ class E2ETrialRunner:
                 if r.get("eval_status") == "error"
             ]
             if error_milestones:
-                logger.info(f"DAG complete but {len(error_milestones)} milestone(s) have eval errors, "
-                            f"waiting for re-evaluation: {error_milestones}")
-                # Wait for watcher to re-evaluate error milestones.
-                # Poll summary.json until errors are resolved or timeout.
-                reeval_timeout = 600  # 10 minutes max
-                reeval_start = time.time()
-                while time.time() - reeval_start < reeval_timeout:
-                    summary = self.orchestrator._load_summary_or_init()
-                    remaining_errors = [
-                        mid for mid in error_milestones
-                        if summary.get("results", {}).get(mid, {}).get("eval_status") == "error"
-                    ]
-                    if not remaining_errors:
-                        logger.info("All error evaluations resolved!")
-                        break
-                    time.sleep(5)
-                else:
-                    logger.warning(f"Timed out waiting for error re-evaluations after {reeval_timeout}s. "
-                                   f"Remaining: {remaining_errors}")
+                # Agent is done and can't fix these anymore. The watcher won't
+                # re-evaluate without a new tag push, so waiting is pointless.
+                # Log and continue — treat eval errors as failed milestones.
+                logger.warning(f"DAG complete. {len(error_milestones)} milestone(s) have eval errors "
+                               f"(infrastructure failures), treating as failed: {error_milestones}")
 
         # Stop watcher
         self.watcher_stop_event.set()
@@ -1749,7 +1735,7 @@ def _run_resume_mode(args):
         exclude_patterns=exclude_patterns,
         generated_patterns=generated_patterns,
         modifiable_test_patterns=modifiable_test_patterns,
-        drop_params=metadata.get("drop_params", False),
+        api_router=metadata.get("api_router", metadata.get("drop_params", False)),
     )
 
     # Prepare agent output directory (reuse existing)
@@ -1864,10 +1850,16 @@ Example:
     )
 
     parser.add_argument(
+        "--api-router",
+        action="store_true",
+        help="Deploy claude-code-router-py inside the container to translate "
+        "Anthropic Messages API to OpenAI format. Only applies to claude-code agent.",
+    )
+
+    parser.add_argument(
         "--drop-params",
         action="store_true",
-        help="Run an in-container proxy that strips unsupported API parameters "
-        "(e.g. context_management) before forwarding. Useful for non-native models via LiteLLM.",
+        help="Deprecated: use --api-router instead.",
     )
 
     parser.add_argument(
@@ -2034,7 +2026,7 @@ Example:
         "dag_path": str(dag_path),
         "srs_root": str(args.srs_root),
         "workspace_root": str(args.workspace_root),
-        "drop_params": args.drop_params,
+        "api_router": args.api_router or args.drop_params,
     }
     metadata_path = trial_root / "trial_metadata.json"
     with open(metadata_path, "w") as f:
@@ -2058,7 +2050,7 @@ Example:
         exclude_patterns=exclude_patterns,  # Exclude patterns for SrcFileFilter
         generated_patterns=generated_patterns,  # Generated code patterns for snapshot inclusion
         modifiable_test_patterns=modifiable_test_patterns,  # Test files agent can modify
-        drop_params=args.drop_params,
+        api_router=args.api_router or args.drop_params,
     )
 
     # Prepare agent output directory

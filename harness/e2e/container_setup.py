@@ -120,8 +120,11 @@ CDN_CIDR_RANGES = [
 class ContainerSetup:
     """Docker container initialization with fakeroot user and Claude credentials."""
 
-    # Port used by the in-container API filter proxy
+    # Port used by the in-container API router
     _PROXY_PORT = 8181
+
+    # Path to vendored claude-code-router-py relative to this file
+    _ROUTER_VENDOR_DIR = Path(__file__).parent.parent.parent / "vendor" / "claude-code-router-py"
 
     def __init__(
         self,
@@ -132,6 +135,7 @@ class ContainerSetup:
         e2e_workspace_path: Optional[Path] = None,
         agent_framework_name: str = "claude-code",
         drop_params: bool = False,
+        api_router: bool = False,
     ):
         """Initialize container setup.
 
@@ -142,10 +146,12 @@ class ContainerSetup:
             agent_name: Git user name for agent commits (default: claude)
             e2e_workspace_path: Path to mount as /e2e_workspace (for E2E mode)
             agent_framework_name: Agent framework to use (default: claude-code)
-            drop_params: If True, run an in-container proxy that strips
-                unsupported API parameters (e.g. context_management) before
-                forwarding to the upstream API. Useful when routing requests
-                through a LiteLLM proxy to non-native models.
+            drop_params: Deprecated, use api_router instead.
+            api_router: If True and agent is claude-code, deploy
+                claude-code-router-py inside the container to translate
+                Anthropic Messages API to OpenAI chat/completions format.
+                This enables Claude Code to work with any OpenAI-compatible
+                model backend without an external LiteLLM proxy.
         """
         self.container_name = container_name
         self.image_name = image_name
@@ -153,7 +159,8 @@ class ContainerSetup:
         self.agent_name = agent_name
         self.e2e_workspace_path = Path(e2e_workspace_path) if e2e_workspace_path else None
         self._framework: AgentFramework = get_agent_framework(agent_framework_name)
-        self.drop_params = drop_params
+        self.api_router = api_router or drop_params
+        self._agent_framework_name = agent_framework_name
 
     def get_agent_mounts(self) -> list[str]:
         """Return Docker volume mount arguments for the agent.
@@ -165,21 +172,28 @@ class ContainerSetup:
         """
         return self._framework.get_container_mounts()
 
+    def _should_use_router(self) -> bool:
+        """Check if the API router should be enabled.
+
+        The router only applies to claude-code agent framework.
+        """
+        return self.api_router and self._agent_framework_name == "claude-code"
+
     def get_agent_env_vars(self) -> list[str]:
         """Return Docker environment variable arguments for the agent.
 
         Delegates to the agent framework for agent-specific env vars.
-        When drop_params is enabled, intercepts *_BASE_URL variables and
-        redirects them to the in-container proxy.
+        When api_router is enabled for claude-code, intercepts *_BASE_URL
+        variables and redirects them to the in-container router.
 
         Returns:
             List of -e arguments for docker run
         """
         env_vars = self._framework.get_container_env_vars()
-        if not self.drop_params:
+        if not self._should_use_router():
             return env_vars
 
-        # Intercept BASE_URL env vars: save original as upstream, redirect to proxy
+        # Intercept BASE_URL env vars: save original as upstream, redirect to router
         result = []
         proxy_url = f"http://localhost:{self._PROXY_PORT}"
         i = 0
@@ -190,7 +204,7 @@ class ContainerSetup:
                     key, _, value = kv.partition("=")
                     result.extend(["-e", f"API_PROXY_UPSTREAM={value}"])
                     result.extend(["-e", f"{key}={proxy_url}"])
-                    logger.info(f"  drop_params: {key} redirected to in-container proxy (upstream: {value})")
+                    logger.info(f"  api_router: {key} redirected to in-container router (upstream: {value})")
                     i += 2
                     continue
             result.append(env_vars[i])
@@ -408,116 +422,122 @@ except Exception as e:
 print("Base container initialization complete!")
 '''
 
-    def _get_proxy_init_script(self) -> str:
-        """Return Python init script that starts an API filter proxy daemon.
+    def _install_router_in_container(self) -> None:
+        """Copy claude-code-router-py into the container and install dependencies."""
+        vendor_dir = self._ROUTER_VENDOR_DIR
+        if not vendor_dir.exists():
+            raise RuntimeError(f"Router vendor directory not found: {vendor_dir}")
 
-        The proxy strips non-standard parameters (e.g. context_management)
-        from API requests before forwarding to the upstream URL. This allows
-        agent CLIs to work with third-party models through LiteLLM proxies
-        that don't have drop_params enabled.
+        # Create target directory
+        subprocess.run(
+            ["docker", "exec", self.container_name, "mkdir", "-p", "/opt/ccr"],
+            check=True, capture_output=True, text=True,
+        )
 
-        The proxy reads API_PROXY_UPSTREAM env var for the upstream URL
-        and listens on localhost:{_PROXY_PORT}.
+        # Copy vendored files into container
+        subprocess.run(
+            ["docker", "cp", f"{vendor_dir}/.", f"{self.container_name}:/opt/ccr/"],
+            check=True, capture_output=True, text=True,
+        )
+
+        # Ensure pip is available, then install dependencies (before network lockdown)
+        subprocess.run(
+            ["docker", "exec", self.container_name,
+             "sh", "-c",
+             "python3 -m pip --version >/dev/null 2>&1 || "
+             "(apt-get update -qq && apt-get install -y -qq python3-pip) 2>/dev/null || "
+             "python3 -m ensurepip --default-pip 2>/dev/null || true"],
+            capture_output=True, text=True, timeout=120,
+        )
+        # Try with --break-system-packages first (PEP 668), fall back without
+        result = subprocess.run(
+            ["docker", "exec", self.container_name,
+             "python3", "-m", "pip", "install", "-q",
+             "--break-system-packages",
+             "-r", "/opt/ccr/requirements.txt"],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0 and "no such option" in (result.stderr or ""):
+            result = subprocess.run(
+                ["docker", "exec", self.container_name,
+                 "python3", "-m", "pip", "install", "-q",
+                 "-r", "/opt/ccr/requirements.txt"],
+                capture_output=True, text=True, timeout=600,
+            )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to install router dependencies: {result.stderr}")
+
+        logger.info("API router (claude-code-router-py) installed in container")
+
+    def _get_router_init_script(self) -> str:
+        """Return Python init script that starts claude-code-router-py daemon.
+
+        The router translates Anthropic Messages API requests to OpenAI
+        chat/completions format, enabling Claude Code to work with any
+        OpenAI-compatible model backend.
+
+        Reads API_PROXY_UPSTREAM and ANTHROPIC_API_KEY env vars.
+        Listens on localhost:{_PROXY_PORT}.
         """
         return f'''
-# === API Filter Proxy ===
+# === API Router (claude-code-router-py) ===
 try:
-    import os, textwrap
-    proxy_script = textwrap.dedent("""\\
-        import json, os, sys
-        from http.server import HTTPServer, BaseHTTPRequestHandler
-        from socketserver import ThreadingMixIn
-        class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-            daemon_threads = True
-        import urllib.request, urllib.error
+    import json, os, subprocess, time
 
-        UPSTREAM = os.environ.get("API_PROXY_UPSTREAM", "")
-        DROP = {{"context_management"}}
+    upstream = os.environ.get("API_PROXY_UPSTREAM", "")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
-        class H(BaseHTTPRequestHandler):
-            def do_POST(self):
-                body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                try:
-                    data = json.loads(body)
-                    for k in DROP & set(data):
-                        del data[k]
-                    body = json.dumps(data).encode()
-                except Exception:
-                    pass
-                target = UPSTREAM.rstrip("/") + self.path
-                hdrs = {{k: v for k, v in self.headers.items() if k.lower() != "host"}}
-                hdrs["Content-Length"] = str(len(body))
-                req = urllib.request.Request(target, data=body, headers=hdrs, method="POST")
-                try:
-                    with urllib.request.urlopen(req, timeout=600) as r:
-                        rb = r.read()
-                        self.send_response(r.status)
-                        for k, v in r.getheaders():
-                            if k.lower() not in ("transfer-encoding", "connection"):
-                                self.send_header(k, v)
-                        self.end_headers()
-                        self.wfile.write(rb)
-                except urllib.error.HTTPError as e:
-                    rb = e.read()
-                    self.send_response(e.code)
-                    for k, v in e.headers.items():
-                        if k.lower() not in ("transfer-encoding", "connection"):
-                            self.send_header(k, v)
-                    self.end_headers()
-                    self.wfile.write(rb)
+    # Ensure upstream ends with /v1/chat/completions for OpenAI format
+    base = upstream.rstrip("/")
+    if not base.endswith("/v1/chat/completions"):
+        api_base_url = base + "/v1/chat/completions"
+    else:
+        api_base_url = base
 
-            def do_GET(self):
-                target = UPSTREAM.rstrip("/") + self.path
-                hdrs = {{k: v for k, v in self.headers.items() if k.lower() != "host"}}
-                req = urllib.request.Request(target, headers=hdrs, method="GET")
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as r:
-                        rb = r.read()
-                        self.send_response(r.status)
-                        for k, v in r.getheaders():
-                            if k.lower() not in ("transfer-encoding", "connection"):
-                                self.send_header(k, v)
-                        self.end_headers()
-                        self.wfile.write(rb)
-                except urllib.error.HTTPError as e:
-                    rb = e.read()
-                    self.send_response(e.code)
-                    for k, v in e.headers.items():
-                        if k.lower() not in ("transfer-encoding", "connection"):
-                            self.send_header(k, v)
-                    self.end_headers()
-                    self.wfile.write(rb)
+    config = {{
+        "PORT": {self._PROXY_PORT},
+        "HOST": "127.0.0.1",
+        "API_TIMEOUT_MS": 600000,
+        "LOG_LEVEL": "info",
+        "Providers": [{{
+            "name": "upstream",
+            "api_base_url": api_base_url,
+            "api_key": api_key,
+            "max_retries": 3,
+            "params": {{
+                "max_tokens": 65536,
+            }}
+        }}],
+        "Router": {{
+            "default": "upstream,/model"
+        }}
+    }}
 
-            def log_message(self, fmt, *args):
-                pass  # silent
+    config_path = "/opt/ccr/config.json"
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
 
-        ThreadedHTTPServer(("127.0.0.1", {self._PROXY_PORT}), H).serve_forever()
-    """)
-    proxy_path = "/usr/local/bin/api_filter_proxy.py"
-    with open(proxy_path, "w") as f:
-        f.write(proxy_script)
-    os.chmod(proxy_path, 0o755)
-
-    # Start proxy as background daemon
-    import subprocess
+    # Start router as background daemon
     subprocess.Popen(
-        ["python3", proxy_path],
-        stdout=open("/tmp/api_proxy.log", "w"),
+        ["python3", "/opt/ccr/main.py", "--config", config_path,
+         "--host", "127.0.0.1", "--port", str({self._PROXY_PORT})],
+        stdout=open("/tmp/api_router.log", "w"),
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
 
-    # Wait briefly and verify it started
-    import time
-    time.sleep(1)
-    try:
-        import urllib.request
-        urllib.request.urlopen("http://127.0.0.1:{self._PROXY_PORT}/", timeout=2)
-    except Exception:
-        pass  # GET to proxy may error, but connection success means it's running
-    print("API filter proxy started on port {self._PROXY_PORT}")
+    # Wait and verify it started
+    time.sleep(3)
+    import urllib.request
+    for attempt in range(5):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:{self._PROXY_PORT}/health", timeout=2)
+            break
+        except Exception:
+            time.sleep(1)
+    print("API router (claude-code-router-py) started on port {self._PROXY_PORT}")
 except Exception as e:
-    print(f"Warning: Failed to start API filter proxy: {{e}}")
+    print(f"Warning: Failed to start API router: {{e}}")
 '''
 
     def get_init_script(self) -> str:
@@ -526,20 +546,20 @@ except Exception as e:
         Combines base initialization with agent-specific initialization.
         The base script sets up fakeroot user, sudo, git config.
         The agent-specific script sets up credentials, tools, etc.
-        Optionally includes an API filter proxy for drop_params mode.
+        Optionally includes the API router for claude-code with non-native models.
 
         Returns:
             Combined Python script as a string
         """
         base_script = self._get_base_init_script()
         agent_script = self._framework.get_container_init_script(self.agent_name)
-        proxy_script = self._get_proxy_init_script() if self.drop_params else ""
+        router_script = self._get_router_init_script() if self._should_use_router() else ""
 
         return f"""{base_script}
 
 # === Agent-specific initialization ===
 {agent_script}
-{proxy_script}
+{router_script}
 print("Container initialization complete!")
 """
 
@@ -621,6 +641,10 @@ print("Container initialization complete!")
         # Ensure Python3 is available for init script
         self._ensure_python3()
 
+        # Install API router if needed (before init script, before network lockdown)
+        if self._should_use_router():
+            self._install_router_in_container()
+
         # Run initialization script
         logger.info("Running container initialization...")
         init_script = self.get_init_script()
@@ -692,7 +716,7 @@ fi
                 ["docker", "exec", self.container_name, "/bin/sh", "-c", install_script],
                 capture_output=True,
                 text=True,
-                timeout=180,  # 3 minute timeout for package installation
+                timeout=600,  # 10 minute timeout for package installation
             )
 
             if result.returncode == 0:

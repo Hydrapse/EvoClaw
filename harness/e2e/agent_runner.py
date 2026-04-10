@@ -51,6 +51,7 @@ class AgentRunner:
         use_sdk: bool = False,
         include_directories: Optional[list[str]] = None,
         drop_params: bool = False,
+        api_router: bool = False,
     ):
         """Initialize agent runner.
 
@@ -64,8 +65,9 @@ class AgentRunner:
             reasoning_effort: Reasoning effort level for Codex ("low", "medium", "high")
             use_sdk: For OpenHands, use SDK mode instead of CLI mode
             include_directories: Extra directories for agent (e.g., ["/e2e_workspace"])
-            drop_params: If True, don't pass *_BASE_URL env vars to docker exec
-                (rely on the in-container proxy set up by ContainerSetup).
+            drop_params: Deprecated, use api_router instead.
+            api_router: If True, don't pass *_BASE_URL env vars to docker exec
+                (rely on the in-container router set up by ContainerSetup).
         """
         self.container_name = container_name
         self.workdir = workdir
@@ -74,7 +76,7 @@ class AgentRunner:
         self.log_dir = Path(log_dir) if log_dir else None
         self.session_id: Optional[str] = None
         self.agent_name = agent_name
-        self.drop_params = drop_params
+        self.api_router = api_router or drop_params
 
         # Build framework kwargs
         framework_kwargs = {}
@@ -97,11 +99,11 @@ class AgentRunner:
     def _get_exec_env_vars(self) -> list[str]:
         """Return env var args for docker exec.
 
-        When drop_params is enabled, strips *_BASE_URL vars so the agent
-        uses the in-container proxy URL from container initialization.
+        When api_router is enabled, strips *_BASE_URL vars so the agent
+        uses the in-container router URL from container initialization.
         """
         env_vars = self._framework.get_container_env_vars()
-        if not self.drop_params:
+        if not self.api_router:
             return env_vars
         filtered = []
         i = 0
@@ -1023,6 +1025,7 @@ class E2EAgentRunner(AgentRunner):
         prompt_version: str = "v1",
         reasoning_effort: Optional[str] = None,
         drop_params: bool = False,
+        api_router: bool = False,
     ):
         """Initialize E2E agent runner.
 
@@ -1036,7 +1039,8 @@ class E2EAgentRunner(AgentRunner):
             timeout_ms: Execution timeout in milliseconds
             prompt_version: Prompt template version (e.g., "v1")
             reasoning_effort: Reasoning effort level for GPT-5 models
-            drop_params: Strip unsupported API params via in-container proxy
+            drop_params: Deprecated, use api_router instead.
+            api_router: Deploy claude-code-router-py for Anthropic-to-OpenAI translation.
         """
         self.output_dir = Path(output_dir) if output_dir else None
         # Use output_dir directly as log_dir (consistent with milestone trial structure)
@@ -1051,7 +1055,7 @@ class E2EAgentRunner(AgentRunner):
             agent_name=agent_name,  # Pass framework name to parent
             reasoning_effort=reasoning_effort,
             include_directories=["/e2e_workspace"],
-            drop_params=drop_params,
+            api_router=api_router or drop_params,
         )
 
         self.repo_src_dirs = repo_src_dirs

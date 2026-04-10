@@ -137,6 +137,26 @@ if [[ ${#TRIAL_NAMES[@]} -eq 0 ]]; then
     fi
 fi
 
+# Validate that each trial actually exists in at least one repo
+for tn in "${TRIAL_NAMES[@]}"; do
+    found=false
+    for repo_dir in "$DATA_ROOT"/*/; do
+        [[ -d "$repo_dir/e2e_trial/$tn" ]] && found=true && break
+    done
+    if ! $found; then
+        echo "Error: trial '$tn' not found in any repo under $DATA_ROOT" >&2
+        echo "" >&2
+        echo "Available trials:" >&2
+        for repo_dir in "$DATA_ROOT"/*/; do
+            [[ ! -d "$repo_dir/e2e_trial" ]] && continue
+            for td in "$repo_dir/e2e_trial"/*/; do
+                [[ -d "$td" ]] && basename "$td"
+            done
+        done | sort -u | while read t; do echo "  $t" >&2; done
+        exit 1
+    fi
+done
+
 # ─────────────────────────────────────────────
 # Auto-generate config
 # ─────────────────────────────────────────────
@@ -315,6 +335,13 @@ for trial_name in trial_names:
                 continue
 
             if event_type == "agent_exec_start":
+                # Auto-close any prior open segment for the same session
+                # (handles cases where exec_end was never written, e.g. process killed)
+                for seg in reversed(segments):
+                    if seg["session_id"] == sid and seg["end"] is None:
+                        seg["end"] = ts
+                        seg["success"] = None  # unknown — implicitly ended
+                        break
                 segments.append({"session_id": sid, "start": ts, "end": None, "success": None})
             elif event_type == "agent_exec_end" and segments:
                 # Match to last open segment
@@ -352,7 +379,7 @@ for trial_name in trial_names:
                 session_color_map[sid],
             ))
 
-if not rows:
+if not rows or len(trial_names) > 1:
     sys.exit(0)
 
 # Also compute total trial elapsed

@@ -44,10 +44,19 @@ class OpenHandsLogParser(AgentLogParser):
         "litellm_proxy/claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
         "litellm_proxy/gpt-4o": {"input": 2.50, "output": 10.0},
         "litellm_proxy/gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        # Z.AI GLM models (official z.ai pricing)
+        "litellm_proxy/glm-5": {"input": 1.0, "output": 3.2, "cache_read": 0.2},
+        "litellm_proxy/glm-5-turbo": {"input": 1.2, "output": 4.0, "cache_read": 0.24},
+        "litellm_proxy/glm-5.1": {"input": 1.4, "output": 4.4, "cache_read": 0.28},
+        "litellm_proxy/glm-4.7": {"input": 0.5, "output": 2.0, "cache_read": 0.1},
         # Direct model names
         "gemini-3-flash-preview": {"input": 0.075, "output": 0.30},
         "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
         "gpt-4o": {"input": 2.50, "output": 10.0},
+        "glm-5": {"input": 1.0, "output": 3.2, "cache_read": 0.2},
+        "glm-5-turbo": {"input": 1.2, "output": 4.0, "cache_read": 0.24},
+        "glm-5.1": {"input": 1.4, "output": 4.4, "cache_read": 0.28},
+        "glm-4.7": {"input": 0.5, "output": 2.0, "cache_read": 0.1},
     }
 
     # Action types that map to tool calls
@@ -650,13 +659,20 @@ class OpenHandsLogParser(AgentLogParser):
             except Exception as e:
                 logger.debug(f"Error parsing observation from {event_file}: {e}")
 
-    def _calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+    def _calculate_cost(
+        self,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+    ) -> float:
         """Calculate cost based on token usage.
 
         Args:
             model: Model name
-            input_tokens: Number of input tokens
+            input_tokens: Number of input tokens (excluding cache reads)
             output_tokens: Number of output tokens
+            cache_read_tokens: Number of cached input tokens
 
         Returns:
             Estimated cost in USD
@@ -665,7 +681,70 @@ class OpenHandsLogParser(AgentLogParser):
         pricing = self.TOKEN_PRICING.get(model, {"input": 0.075, "output": 0.30})
         input_cost = (input_tokens / 1_000_000) * pricing["input"]
         output_cost = (output_tokens / 1_000_000) * pricing["output"]
-        return input_cost + output_cost
+        cache_read_cost = (cache_read_tokens / 1_000_000) * pricing.get(
+            "cache_read", pricing["input"] * 0.2
+        )
+        return input_cost + output_cost + cache_read_cost
+
+    @staticmethod
+    def _parse_stdout_token_summary(stdout_file: Path) -> Optional[Dict]:
+        """Parse the 'Tokens: ...' summary line from OpenHands stdout.
+
+        Format: Tokens: ↑ input 1.63M • cache hit 90.94% • reasoning 4.11K • ↓ output 12.14K
+
+        Returns:
+            Dict with input_tokens, output_tokens, cache_hit_pct, or None if not found.
+        """
+        import re
+
+        def _parse_amount(s: str) -> int:
+            """Parse '1.63M', '12.14K', '378.36K' etc. to integer."""
+            s = s.strip().rstrip(" •")
+            m = re.match(r"([\d.]+)\s*([KMB]?)", s, re.IGNORECASE)
+            if not m:
+                return 0
+            val = float(m.group(1))
+            suffix = m.group(2).upper()
+            if suffix == "K":
+                return int(val * 1_000)
+            elif suffix == "M":
+                return int(val * 1_000_000)
+            elif suffix == "B":
+                return int(val * 1_000_000_000)
+            return int(val)
+
+        try:
+            text = stdout_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return None
+
+        # Find the last "Tokens:" line
+        last_tokens_line = None
+        for line in text.splitlines():
+            if line.startswith("Tokens:"):
+                last_tokens_line = line
+
+        if not last_tokens_line:
+            return None
+
+        result = {"input_tokens": 0, "output_tokens": 0, "cache_hit_pct": 0.0}
+
+        # Parse input
+        m = re.search(r"input\s+([\d.]+\s*[KMB]?)", last_tokens_line, re.IGNORECASE)
+        if m:
+            result["input_tokens"] = _parse_amount(m.group(1))
+
+        # Parse output
+        m = re.search(r"output\s+([\d.]+\s*[KMB]?)", last_tokens_line, re.IGNORECASE)
+        if m:
+            result["output_tokens"] = _parse_amount(m.group(1))
+
+        # Parse cache hit percentage
+        m = re.search(r"cache hit\s+([\d.]+)%", last_tokens_line)
+        if m:
+            result["cache_hit_pct"] = float(m.group(1))
+
+        return result if result["input_tokens"] > 0 else None
 
     def parse_stdout_stats(self, stdout_file: Path, log_dir: Optional[Path] = None) -> Dict:
         """Parse statistics from raw logs or stdout.
@@ -821,6 +900,9 @@ class OpenHandsLogParser(AgentLogParser):
                 logger.debug(f"Error parsing event file {event_file}: {e}")
 
         # Parse cost and token usage from base_state.json
+        # We independently recalculate cost from token_usages[] (per-call records)
+        # instead of trusting accumulated_cost, because OpenHands SDK has a bug
+        # where accumulated_cost stops updating after session resume.
         base_state_files = list(log_dir.rglob("base_state.json"))
         for base_state_file in base_state_files:
             try:
@@ -829,32 +911,142 @@ class OpenHandsLogParser(AgentLogParser):
                 usage_to_metrics = stats.get("usage_to_metrics", {})
 
                 for usage_id, metrics in usage_to_metrics.items():
-                    # Get accumulated cost
-                    accumulated_cost = metrics.get("accumulated_cost", 0.0)
-                    total_cost += accumulated_cost
-
-                    # Get token usage, strip litellm_proxy/ prefix from model name
-                    model_name = metrics.get("model_name", "unknown")
+                    model_name_raw = metrics.get("model_name", "unknown")
+                    # Strip litellm_proxy/ prefix for display
+                    model_name = model_name_raw
                     if model_name.startswith("litellm_proxy/"):
                         model_name = model_name[len("litellm_proxy/") :]
-                    token_usage = metrics.get("accumulated_token_usage", {})
 
-                    # Count LLM API calls from costs array
-                    api_calls = len(metrics.get("costs", []))
-                    total_turns += api_calls
+                    # Independently recalculate from token_usages[] (per-call records)
+                    # This is more reliable than accumulated_cost which breaks on resume
+                    token_usages = metrics.get("token_usages", [])
+                    recalc_input = 0
+                    recalc_output = 0
+                    recalc_cache_read = 0
+                    recalc_reasoning = 0
+                    recalc_calls = len(token_usages)
 
-                    if token_usage:
-                        model_usage[model_name]["inputTokens"] += token_usage.get("prompt_tokens", 0)
-                        model_usage[model_name]["outputTokens"] += token_usage.get("completion_tokens", 0)
-                        model_usage[model_name]["cacheReadTokens"] += token_usage.get("cache_read_tokens", 0)
-                        model_usage[model_name]["reasoningTokens"] += token_usage.get("reasoning_tokens", 0)
-                        model_usage[model_name]["costUSD"] += accumulated_cost
-                        model_usage[model_name]["apiRequests"] += api_calls
+                    for tu in token_usages:
+                        recalc_input += tu.get("prompt_tokens", 0)
+                        recalc_output += tu.get("completion_tokens", 0)
+                        recalc_cache_read += tu.get("cache_read_tokens", 0)
+                        recalc_reasoning += tu.get("reasoning_tokens", 0)
 
-                logger.info(f"Parsed base_state.json: cost=${total_cost:.4f}")
+                    # Also check accumulated_token_usage as fallback
+                    # (in case token_usages[] is also incomplete)
+                    acc_usage = metrics.get("accumulated_token_usage", {})
+                    acc_input = acc_usage.get("prompt_tokens", 0)
+                    acc_output = acc_usage.get("completion_tokens", 0)
+                    acc_cache = acc_usage.get("cache_read_tokens", 0)
+                    acc_reasoning = acc_usage.get("reasoning_tokens", 0)
+
+                    # Use whichever source has more data
+                    if recalc_input + recalc_output >= acc_input + acc_output:
+                        final_input = recalc_input
+                        final_output = recalc_output
+                        final_cache = recalc_cache_read
+                        final_reasoning = recalc_reasoning
+                        final_calls = recalc_calls
+                    else:
+                        final_input = acc_input
+                        final_output = acc_output
+                        final_cache = acc_cache
+                        final_reasoning = acc_reasoning
+                        # Fall back to costs[] length for call count
+                        final_calls = max(recalc_calls, len(metrics.get("costs", [])))
+
+                    total_turns += max(final_calls, len(metrics.get("costs", [])))
+
+                    # Recalculate cost using our own pricing
+                    # Input tokens for pricing = total prompt - cache_read (cache is priced separately)
+                    non_cached_input = max(0, final_input - final_cache)
+                    recalc_cost = self._calculate_cost(
+                        model_name_raw, non_cached_input, final_output, final_cache
+                    )
+                    # Also try with stripped name
+                    if model_name_raw not in self.TOKEN_PRICING and model_name in self.TOKEN_PRICING:
+                        recalc_cost = self._calculate_cost(
+                            model_name, non_cached_input, final_output, final_cache
+                        )
+
+                    total_cost += recalc_cost
+
+                    model_usage[model_name]["inputTokens"] += final_input
+                    model_usage[model_name]["outputTokens"] += final_output
+                    model_usage[model_name]["cacheReadTokens"] += final_cache
+                    model_usage[model_name]["reasoningTokens"] += final_reasoning
+                    model_usage[model_name]["costUSD"] += recalc_cost
+                    model_usage[model_name]["apiRequests"] += final_calls
+
+                    sdk_cost = metrics.get("accumulated_cost", 0.0)
+                    if abs(recalc_cost - sdk_cost) > 0.01:
+                        logger.info(
+                            f"Cost recalculated for {model_name}: "
+                            f"SDK=${sdk_cost:.2f} → recalc=${recalc_cost:.2f} "
+                            f"(input={final_input}, output={final_output}, "
+                            f"cache={final_cache}, calls={final_calls})"
+                        )
+
+                logger.info(f"Parsed base_state.json: recalculated cost=${total_cost:.4f}")
 
             except Exception as e:
                 logger.debug(f"Error parsing base_state.json: {e}")
+
+        # Fallback: count actual LLM calls from event files (llm_response_id)
+        # and parse token totals from stdout. This handles cases where
+        # base_state.json's cost/token tracking broke after session resume.
+        def _has_llm_response(ef):
+            try:
+                return bool(json.loads(ef.read_text(encoding="utf-8")).get("llm_response_id"))
+            except Exception:
+                return False
+        actual_llm_calls = sum(1 for ef in event_files if _has_llm_response(ef)) if event_files else 0
+
+        if actual_llm_calls > total_turns * 2:
+            # base_state.json significantly undercounts LLM calls.
+            # This happens when OpenHands SDK's cost tracking breaks after session resume.
+            # Use event file count for turns and estimate cost from per-turn averages.
+            logger.warning(
+                f"Cost tracking gap detected: base_state recorded {total_turns} calls, "
+                f"but event files show {actual_llm_calls} actual LLM calls. "
+                f"OpenHands SDK bug: cost tracking stops after session resume."
+            )
+            base_state_turns = total_turns
+            total_turns = actual_llm_calls
+
+            # Estimate tokens using per-turn averages from base_state data
+            # (the base_state tokens are accurate for the calls it DID track)
+            model_for_pricing = next(iter(model_usage.keys()), "glm-5")
+            mu = model_usage.get(model_for_pricing, {})
+            tracked_input = mu.get("inputTokens", 0)
+            tracked_output = mu.get("outputTokens", 0)
+            tracked_cache = mu.get("cacheReadTokens", 0)
+            tracked_calls = mu.get("apiRequests", 0) or base_state_turns
+
+            if tracked_calls > 0 and tracked_input > 0:
+                # Scale up proportionally
+                scale = actual_llm_calls / tracked_calls
+                est_input = int(tracked_input * scale)
+                est_output = int(tracked_output * scale)
+                est_cache = int(tracked_cache * scale)
+                est_non_cached = max(0, est_input - est_cache)
+
+                recalc_cost = self._calculate_cost(
+                    model_for_pricing, est_non_cached, est_output, est_cache
+                )
+                total_cost = recalc_cost
+
+                model_usage[model_for_pricing]["inputTokens"] = est_input
+                model_usage[model_for_pricing]["outputTokens"] = est_output
+                model_usage[model_for_pricing]["cacheReadTokens"] = est_cache
+                model_usage[model_for_pricing]["costUSD"] = recalc_cost
+                model_usage[model_for_pricing]["apiRequests"] = actual_llm_calls
+
+                logger.info(
+                    f"Estimated cost for {model_for_pricing}: ${recalc_cost:.2f} "
+                    f"(scaled {tracked_calls}→{actual_llm_calls} calls, "
+                    f"input={est_input:,} output={est_output:,} cache={est_cache:,})"
+                )
 
         # Calculate duration
         total_duration_ms = 0

@@ -83,7 +83,8 @@ def run_repo(
     timeout: int,
     trial_name: str,
     reasoning_effort: str | None,
-    drop_params: bool,
+    api_router: bool,
+    force: bool,
     semaphore: threading.Semaphore,
     results: dict,
 ):
@@ -93,8 +94,23 @@ def run_repo(
     srs_root = repo / "srs"
     workspace_root = repo
 
-    # Check if trial already exists for this repo → skip if done, auto-resume if incomplete
+    # Force mode: remove existing trial directory and start fresh
     trial_dir = workspace_root / "e2e_trial" / trial_name
+    if force and trial_dir.exists():
+        import shutil
+        print(f"\033[0;33m[FORCE]\033[0m  {repo_name}  (removing existing trial dir)")
+        try:
+            shutil.rmtree(trial_dir)
+        except PermissionError:
+            # Docker-created files may be root-owned; use a container to remove
+            subprocess.run(
+                ["docker", "run", "--rm", "-v", f"{trial_dir}:/data", "alpine", "rm", "-rf", "/data"],
+                capture_output=True, timeout=30,
+            )
+            if trial_dir.exists():
+                shutil.rmtree(trial_dir)
+
+    # Check if trial already exists for this repo → skip if done, auto-resume if incomplete
     metadata_path = trial_dir / "trial_metadata.json"
     can_resume = trial_dir.exists() and metadata_path.exists()
     if can_resume:
@@ -140,8 +156,10 @@ def run_repo(
         ]
         if reasoning_effort:
             cmd.extend(["--reasoning-effort", reasoning_effort])
-        if drop_params:
-            cmd.append("--drop-params")
+        if api_router:
+            cmd.append("--api-router")
+        if force:
+            cmd.append("--force")
 
     with semaphore:
         print(f"\033[0;32m[START]\033[0m  {repo_name}")
@@ -181,6 +199,8 @@ def main():
     parser.add_argument("--config", type=Path, required=True, help="Path to trial_config.yaml")
     parser.add_argument("--max-parallel", type=int, default=None, help="Override max parallel repos")
     parser.add_argument("--repos", nargs="+", default=None, help="Override repo filters")
+    parser.add_argument("--force", action="store_true",
+                        help="Remove existing trial directories and containers before starting fresh")
     args = parser.parse_args()
 
     # Load config
@@ -197,7 +217,7 @@ def main():
     model = cfg.get("model", "claude-sonnet-4-5-20250929")
     timeout = cfg.get("timeout", 18000)
     reasoning_effort = cfg.get("reasoning_effort", None)
-    drop_params = cfg.get("drop_params", False)
+    api_router = cfg.get("api_router", cfg.get("drop_params", False))
     max_parallel = args.max_parallel if args.max_parallel is not None else cfg.get("max_parallel", None)
     repo_filters = args.repos or cfg.get("repos", None)
 
@@ -257,7 +277,7 @@ def main():
     for repo in repos:
         t = threading.Thread(
             target=run_repo,
-            args=(repo, agent, model, timeout, trial_name, reasoning_effort, drop_params, semaphore, results),
+            args=(repo, agent, model, timeout, trial_name, reasoning_effort, api_router, args.force, semaphore, results),
             daemon=True,
         )
         threads.append(t)

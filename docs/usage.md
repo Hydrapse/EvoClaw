@@ -13,8 +13,8 @@ cp trial_config.example.yaml trial_config.yaml
 export UNIFIED_API_KEY="sk-..."
 export UNIFIED_BASE_URL="https://..."    # optional, for proxy or custom endpoints
 
-# 3. Run all repos in parallel
-python scripts/run_all.py --config trial_config.yaml
+# 3. Run all repos in parallel (use nohup to avoid pipe/terminal issues)
+nohup python scripts/run_all.py --config trial_config.yaml > .evoclaw/run_trial-name.log 2>&1 &
 
 # 4. Monitor progress (in another terminal)
 ./scripts/monitor.sh my_experiment

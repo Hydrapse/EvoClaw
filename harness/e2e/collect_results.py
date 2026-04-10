@@ -1492,11 +1492,38 @@ def _detect_repo_status(workspace_root: Path, trial: str) -> str:
     if orchestrator_alive:
         return "running"
 
-    # Orchestrator is not alive — check completion before container state,
-    # because containers may be kept running after the trial finishes.
+    # Orchestrator is not alive — check if trial is fully complete or just stopped.
     eval_dir = trial_dir / "evaluation"
-    if eval_dir.exists() and any(eval_dir.iterdir()):
-        return "done"
+    summary_file = eval_dir / "summary.json" if eval_dir.exists() else None
+    if summary_file and summary_file.exists():
+        try:
+            import json as _json
+            with open(summary_file) as _f:
+                _summary = _json.load(_f)
+            _rs = _summary.get("resume_state", {})
+            _total = _summary.get("total_milestones", 0)
+
+            # Method 1: resume_state tracks completed/failed/skipped
+            _completed = set(_rs.get("completed_milestones", []))
+            _failed = set(_rs.get("failed_milestones", []))
+            _skipped = set(_rs.get("skipped_milestones", []))
+            _accounted = len(_completed | _failed | _skipped)
+            if _total > 0 and _accounted >= _total:
+                return "done"
+
+            # Method 2: check top-level results count (used by OpenHands)
+            _results = _summary.get("results", {})
+            if _total > 0 and len(_results) >= _total:
+                return "done"
+
+            # Method 3: check submitted_milestones in resume_state
+            _submitted = len(_rs.get("submitted_milestones", []))
+            if _total > 0 and _submitted >= _total:
+                return "done"
+        except Exception:
+            pass
+        # Has eval results but not all milestones done — stopped mid-run
+        return "stopped"
 
     # No evaluation results yet — check if docker container is still running
     # (could indicate the orchestrator crashed mid-run)

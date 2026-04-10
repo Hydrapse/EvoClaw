@@ -46,6 +46,35 @@ class ClaudeCodeLogParser(AgentLogParser):
             "cache_write_5m": 6.25,
             "cache_write_1h": 10.0,
         },
+        "claude-haiku": {
+            "input": 1.0,
+            "output": 5.0,
+            "cache_read": 0.1,
+            "cache_write_5m": 1.25,
+            "cache_write_1h": 2.0,
+        },
+        # Z.AI GLM models (official z.ai pricing)
+        "glm-5": {
+            "input": 1.0,
+            "output": 3.2,
+            "cache_read": 0.2,
+            "cache_write_5m": 1.0,
+            "cache_write_1h": 1.0,
+        },
+        "glm-5.1": {
+            "input": 1.4,
+            "output": 4.4,
+            "cache_read": 0.28,
+            "cache_write_5m": 1.4,
+            "cache_write_1h": 1.4,
+        },
+        "glm-4.7": {
+            "input": 0.5,
+            "output": 2.0,
+            "cache_read": 0.1,
+            "cache_write_5m": 0.5,
+            "cache_write_1h": 0.5,
+        },
     }
 
     def extract_raw_logs(
@@ -126,6 +155,15 @@ class ClaudeCodeLogParser(AgentLogParser):
         model_l = (model or "").lower()
         if "opus" in model_l:
             return self.TOKEN_PRICING["claude-opus"]
+        if "haiku" in model_l:
+            return self.TOKEN_PRICING.get("claude-haiku", self.TOKEN_PRICING["claude-sonnet"])
+        # Z.AI GLM models
+        if "glm-5.1" in model_l:
+            return self.TOKEN_PRICING["glm-5.1"]
+        if "glm-5" in model_l:
+            return self.TOKEN_PRICING["glm-5"]
+        if "glm-4.7" in model_l:
+            return self.TOKEN_PRICING["glm-4.7"]
         return self.TOKEN_PRICING["claude-sonnet"]
 
     def _calculate_message_cost(
@@ -482,6 +520,32 @@ class ClaudeCodeLogParser(AgentLogParser):
         model_usage_dict = {model: dict(usage) for model, usage in model_usage.items()}
 
         unique_session_count = len(unique_session_ids) if unique_session_ids else session_count
+
+        # Supplement turn count from JSONL files (assistant messages with usage).
+        # The stdout result JSON only contains main-agent turns from completed
+        # sessions. Crashed sessions (e.g. context overflow) and subagent calls
+        # are missing. JSONL counting captures everything.
+        if logs_dir and logs_dir.exists():
+            jsonl_turns = 0
+            for jsonl_file in logs_dir.rglob("*.jsonl"):
+                try:
+                    with open(jsonl_file, encoding="utf-8") as f:
+                        for line in f:
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            msg = obj.get("message", {})
+                            if isinstance(msg, dict) and msg.get("usage", {}).get("input_tokens"):
+                                jsonl_turns += 1
+                except Exception:
+                    continue
+            if jsonl_turns > total_turns:
+                logger.info(
+                    f"JSONL turn count ({jsonl_turns}) exceeds stdout count ({total_turns}); "
+                    f"using JSONL count (covers crashed sessions and subagent calls)"
+                )
+                total_turns = jsonl_turns
 
         logger.info(
             f"Parsed stdout: {session_count} executions, {unique_session_count} unique sessions, "
