@@ -1,0 +1,66 @@
+{
+  "milestone_id": "M004",
+  "patch_is_None": false,
+  "patch_exists": true,
+  "patch_successfully_applied": true,
+  "resolved": false,
+  "tests_status": {
+    "FAIL_TO_PASS": {
+      "success": [
+        "dubbo-metrics/dubbo-tracing::org.apache.dubbo.tracing.DefaultDubboServerObservationConventionTest::testGetLowCardinalityKeyValues",
+        "dubbo-metrics/dubbo-tracing::org.apache.dubbo.tracing.DefaultDubboClientObservationConventionTest::testGetLowCardinalityKeyValues"
+      ],
+      "failure": []
+    },
+    "NONE_TO_PASS": {
+      "success": [
+        "dubbo-common::org.apache.dubbo.common.utils.NetUtilsTest::testRepeatedStatusChecking"
+      ],
+      "failure": [
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy2, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@561f9d92, count:2], output: Dubbo, #3]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument post test [path: /beanArgTest, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@19fbc594, quote:5], output: 5, #3]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy, body: [org.apache.dubbo.rpc.protocol.tri.rest.service.Book@377dfb8d], output: Dubbo, #1]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy, body: <org.apache.dubbo.rpc.protocol.tri.rest.service.Book@2c06b113 name=Dubbo price=0 publishDate=null>, output: Dubbo, #0]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy, body: [org.apache.dubbo.rpc.protocol.tri.rest.service.Book@7bd38fed], output: Dubbo, #1]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy2, body: [org.apache.dubbo.rpc.protocol.tri.rest.service.Book@46bb0bdf, 2], output: Dubbo, #2]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy2, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@46bb0bdf, count:2], output: Dubbo, #3]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument post test [path: /beanArgTest, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@4b3a01d8], output: 6, #2]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy2, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@1c84d80a, count:2], output: Dubbo, #3]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument post test [path: /beanArgTest, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@4b3a01d8, quote:5], output: 5, #3]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument post test [path: /beanArgTest, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@2d237460], output: 6, #2]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.mapping.RadixTreeTest::test repeat add,no predicate function",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument post test [path: /beanArgTest, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@48f2054d], output: 6, #2]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument post test [path: /beanArgTest, body: [book:org.apache.dubbo.rpc.protocol.tri.rest.service.Book@2f4d32bf, quote:5], output: 5, #3]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy2, body: [org.apache.dubbo.rpc.protocol.tri.rest.service.Book@40c8067, 2], output: Dubbo, #2]",
+        "dubbo-rpc/dubbo-rpc-triple::org.apache.dubbo.rpc.protocol.tri.rest.support.basic.RestProtocolTest::bean argument test [path: /buy2, body: [org.apache.dubbo.rpc.protocol.tri.rest.service.Book@5763a655, 2], output: Dubbo, #2]"
+      ]
+    },
+    "PASS_TO_PASS": {
+      "success_count": 4971,
+      "failure": [
+        "dubbo-test/dubbo-test-modules::org.apache.dubbo.dependency.FileTest::checkDubboAllShade",
+        "dubbo-test/dubbo-test-modules::org.apache.dubbo.dependency.FileTest::checkArtifacts",
+        "dubbo-test/dubbo-test-modules::org.apache.dubbo.dependency.FileTest::checkDubboBom",
+        "dubbo-test/dubbo-test-modules::org.apache.dubbo.dependency.FileTest::checkDubboAllDependencies",
+        "dubbo-test/dubbo-test-modules::org.apache.dubbo.dependency.FileTest::checkDubboAllNettyShade",
+        "dubbo-test/dubbo-test-modules::org.apache.dubbo.dependency.FileTest::checkDubboDependenciesAll"
+      ],
+      "missing": 1925
+    }
+  },
+  "test_summary": {
+    "total": 5018,
+    "passed": 4957,
+    "failed": 9,
+    "error": 1,
+    "skipped": 51,
+    "fail_to_pass_required": 2,
+    "fail_to_pass_achieved": 2,
+    "none_to_pass_required": 17,
+    "none_to_pass_achieved": 1,
+    "pass_to_pass_required": 6902,
+    "pass_to_pass_achieved": 4971,
+    "pass_to_pass_failed": 6,
+    "pass_to_pass_missing": 1925
+  }
+}
