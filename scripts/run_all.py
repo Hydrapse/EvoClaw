@@ -226,8 +226,14 @@ def main():
     timeout = cfg.get("timeout", 18000)
     reasoning_effort = cfg.get("reasoning_effort", None)
     api_router = cfg.get("api_router", cfg.get("drop_params", False))
+    default_haiku_model = cfg.get("default_haiku_model", None)
     max_parallel = args.max_parallel if args.max_parallel is not None else cfg.get("max_parallel", None)
     repo_filters = args.repos or cfg.get("repos", None)
+
+    # Propagate default_haiku_model to child processes via env var
+    # (ClaudeCodeFramework reads UNIFIED_DEFAULT_HAIKU_MODEL)
+    if default_haiku_model:
+        os.environ["UNIFIED_DEFAULT_HAIKU_MODEL"] = default_haiku_model
 
     # Validate
     if not data_root.exists():

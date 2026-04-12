@@ -34,6 +34,8 @@ python scripts/run_all.py --config trial_config.yaml --repos navidrome dubbo
 
 The config only requires two fields: `data_root` and `trial_name`. Everything else has sensible defaults. See [`trial_config.example.yaml`](../trial_config.example.yaml) for the full template with comments.
 
+> **Third-party endpoints:** When running Claude Code against non-Anthropic endpoints (e.g., Z.AI, DeepSeek), set `default_haiku_model` in the trial config to your main model name. This prevents Claude Code's internal background tasks from sending requests to Anthropic's Haiku API — which would fail or incur unexpected costs when `UNIFIED_BASE_URL` points elsewhere.
+
 ---
 
 ## Run a Single Repo

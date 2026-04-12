@@ -40,6 +40,14 @@ timeout: 18000
 # e.g., if you have limited GPU/memory or API rate limits.
 # max_parallel: 3
 
+# Override the model Claude Code uses for background tasks (skill listing,
+# auto-memory, subagent spawning, context management). By default Claude
+# Code uses Haiku for these. When running through a proxy or third-party
+# endpoint, Haiku requests may route to a different (possibly expensive)
+# backend. Set this to your main model to keep all requests on the same
+# endpoint.
+# default_haiku_model: glm-5.1
+
 # Deploy claude-code-router-py inside the container to translate between
 # Anthropic Messages API and OpenAI chat/completions format. Only applies
 # to claude-code agent. Use when running Claude Code against non-Anthropic

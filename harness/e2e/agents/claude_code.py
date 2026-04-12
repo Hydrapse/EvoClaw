@@ -57,6 +57,7 @@ class ClaudeCodeFramework(AgentFramework):
         self._api_key = api_key or os.environ.get("UNIFIED_API_KEY")
         self._base_url = base_url or os.environ.get("UNIFIED_BASE_URL")
         self._reasoning_effort = reasoning_effort or "high"
+        self._default_haiku_model = os.environ.get("UNIFIED_DEFAULT_HAIKU_MODEL")
 
     def get_effective_reasoning_effort(self) -> Optional[str]:
         """Return effective reasoning effort (default: high)."""
@@ -86,6 +87,8 @@ class ClaudeCodeFramework(AgentFramework):
             env_vars.extend(["-e", f"ANTHROPIC_API_KEY={self._api_key}"])
         if self._base_url:
             env_vars.extend(["-e", f"ANTHROPIC_BASE_URL={self._base_url}"])
+        if self._default_haiku_model:
+            env_vars.extend(["-e", f"ANTHROPIC_DEFAULT_HAIKU_MODEL={self._default_haiku_model}"])
         return env_vars
 
     def get_container_mounts(self) -> List[str]:
