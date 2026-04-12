@@ -64,7 +64,7 @@ class ClaudeCodeLogParser(AgentLogParser):
         "glm-5.1": {
             "input": 1.4,
             "output": 4.4,
-            "cache_read": 0.28,
+            "cache_read": 0.26,
             "cache_write_5m": 1.4,
             "cache_write_1h": 1.4,
         },
@@ -74,6 +74,16 @@ class ClaudeCodeLogParser(AgentLogParser):
             "cache_read": 0.1,
             "cache_write_5m": 0.5,
             "cache_write_1h": 0.5,
+        },
+        # glm-4.5-air: cheaper variant. open.bigmodel.cn silently aliases
+        # claude-haiku-* model requests to glm-4.5-air, so we remap haiku
+        # token usage to this pricing when re-evaluating bigmodel trials.
+        "glm-4.5-air": {
+            "input": 0.2,
+            "output": 1.1,
+            "cache_read": 0.03,
+            "cache_write_5m": 0.2,
+            "cache_write_1h": 0.2,
         },
     }
 
@@ -164,6 +174,8 @@ class ClaudeCodeLogParser(AgentLogParser):
             return self.TOKEN_PRICING["glm-5"]
         if "glm-4.7" in model_l:
             return self.TOKEN_PRICING["glm-4.7"]
+        if "glm-4.5-air" in model_l:
+            return self.TOKEN_PRICING["glm-4.5-air"]
         return self.TOKEN_PRICING["claude-sonnet"]
 
     def _calculate_message_cost(

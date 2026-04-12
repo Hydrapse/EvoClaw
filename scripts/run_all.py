@@ -201,7 +201,15 @@ def main():
     parser.add_argument("--repos", nargs="+", default=None, help="Override repo filters")
     parser.add_argument("--force", action="store_true",
                         help="Remove existing trial directories and containers before starting fresh")
+    parser.add_argument("--new", action="store_true",
+                        help="Create a new trial directory with the next available _NNN suffix "
+                             "(e.g. _001 → _002 → _003) instead of resuming an existing one. "
+                             "Use sleep between parallel launches to avoid number-collision races.")
     args = parser.parse_args()
+
+    if args.new and args.force:
+        print("Error: --new and --force are mutually exclusive")
+        sys.exit(1)
 
     # Load config
     with open(args.config) as f:
@@ -235,6 +243,21 @@ def main():
     if not repos:
         print(f"Error: no repos found in {data_root}")
         sys.exit(1)
+
+    # --new: bump trial_name to the next unused _NNN suffix across selected repos
+    if args.new:
+        base_name = re.sub(r"_\d{3}$", "", trial_name)
+        max_existing = 0
+        for repo in repos:
+            e2e_trial_dir = repo / "e2e_trial"
+            if not e2e_trial_dir.exists():
+                continue
+            for d in e2e_trial_dir.iterdir():
+                m = re.match(rf"^{re.escape(base_name)}_(\d{{3}})$", d.name)
+                if m:
+                    max_existing = max(max_existing, int(m.group(1)))
+        trial_name = f"{base_name}_{max_existing + 1:03d}"
+        print(f"--new: next available trial_name = {trial_name}")
 
     # Set parallelism
     if max_parallel is None:
