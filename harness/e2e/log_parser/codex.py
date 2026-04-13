@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from harness.e2e.log_parser.base import AgentLogParser, register_parser
 from harness.e2e.log_parser.models import NativeUsageUnit, ToolCallRecord
+from harness.e2e.pricing import resolve_pricing as _resolve_pricing_shared
 
 logger = logging.getLogger(__name__)
 
@@ -336,33 +337,7 @@ class CodexLogParser(AgentLogParser):
             _bash_command=command if command else None,
         )
 
-    # Token pricing per 1M tokens.
-    # Verified against https://developers.openai.com/api/docs/models on 2026-04-08.
-    #
-    # Pricing entries can be either:
-    # - flat: {"input": ..., "cached_input": ..., "output": ...}
-    # - tiered: {"tiers": [{"threshold": ..., ...}, ...]}
-    #
-    # For GPT-5.4, prompts above 272K input tokens are billed at 2x input
-    # and 1.5x output for the full session.
-    # Reasoning/thought tokens are billed as output tokens.
-    TOKEN_PRICING = {
-        "gpt-5.4": {
-            "tiers": [
-                {"threshold": 272_000, "input": 2.50, "cached_input": 0.25, "output": 15.00},
-                {"threshold": float("inf"), "input": 5.00, "cached_input": 0.50, "output": 22.50},
-            ]
-        },
-        "gpt-5.3-codex": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-        "gpt-5.2-codex": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-        "gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14.00},
-        "gpt-5.2-pro": {"input": 21.00, "cached_input": 2.10, "output": 168.00},
-        "gpt-4o": {"input": 2.50, "cached_input": 1.25, "output": 10.00},
-        "gpt-4o-mini": {"input": 0.15, "cached_input": 0.075, "output": 0.60},
-        "gpt-4-turbo": {"input": 10.00, "cached_input": 5.00, "output": 30.00},
-        "gpt-4": {"input": 30.00, "cached_input": 15.00, "output": 60.00},
-        "gpt-3.5-turbo": {"input": 0.50, "cached_input": 0.25, "output": 1.50},
-    }
+    # Pricing imported from harness.e2e.pricing (single source of truth).
 
     @classmethod
     def _resolve_pricing(
@@ -377,37 +352,13 @@ class CodexLogParser(AgentLogParser):
         (which can be millions of tokens) from incorrectly triggering the
         higher pricing tier.
         """
-        pricing = cls.TOKEN_PRICING.get(model)
-        if pricing is None:
-            logger.warning(
-                f"Unknown model '{model}' for cost calculation, using default pricing "
-                f"(input: $1.75/1M, cached: $0.175/1M, output: $14.00/1M)"
-            )
-            return {"input": 1.75, "cached_input": 0.175, "output": 14.00}
-
-        tiers = pricing.get("tiers")
-        if not tiers:
-            return pricing
-
-        # Use context_window as the tier selector when available, since
-        # input_tokens may be a session-level aggregate rather than a
-        # per-request count.
         tier_key = context_window if context_window is not None else input_tokens
-
-        for tier in tiers:
-            threshold = tier["threshold"]
-            if threshold == float("inf") or tier_key <= int(threshold):
-                return {
-                    "input": float(tier["input"]),
-                    "cached_input": float(tier["cached_input"]),
-                    "output": float(tier["output"]),
-                }
-
-        last_tier = tiers[-1]
+        rates = _resolve_pricing_shared(model, prompt_tokens=tier_key)
+        # Map canonical field name to Codex-expected field name
         return {
-            "input": float(last_tier["input"]),
-            "cached_input": float(last_tier["cached_input"]),
-            "output": float(last_tier["output"]),
+            "input": rates.get("input", 0),
+            "cached_input": rates.get("cache_read", 0),
+            "output": rates.get("output", 0),
         }
 
     def _calculate_cost(

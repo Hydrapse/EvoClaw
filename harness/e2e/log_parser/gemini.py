@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from harness.e2e.log_parser.base import AgentLogParser, register_parser
 from harness.e2e.log_parser.models import NativeUsageUnit, ToolCallRecord, TrialStats
+from harness.e2e.pricing import has_tiered_pricing as _has_tiered_pricing_shared
+from harness.e2e.pricing import resolve_pricing as _resolve_pricing_shared
 
 logger = logging.getLogger(__name__)
 
@@ -28,52 +30,7 @@ class GeminiLogParser(AgentLogParser):
     GEMINI_HOME = "/home/fakeroot/.gemini"
     TMP_DIR = f"{GEMINI_HOME}/tmp"
 
-    # Token pricing per 1M tokens (as of January 2026)
-    # https://ai.google.dev/gemini-api/docs/pricing
-    # https://cloud.google.com/vertex-ai/generative-ai/pricing
-    # cached = context caching read price
-    #
-    # Models with tiered pricing use "tiers" list (ordered by threshold).
-    # Each tier applies when prompt_tokens <= threshold.
-    # The last tier should use float("inf") as a catch-all.
-    TOKEN_PRICING = {
-        # Gemini 3 series (preview)
-        "gemini-3-flash-preview": {"input": 0.50, "output": 3.00, "cached": 0.05},
-        "gemini-3-pro-preview": {
-            "tiers": [
-                # <= 200K prompt tokens per request
-                {"threshold": 200_000, "input": 2.00, "output": 12.00, "cached": 0.20},
-                # > 200K prompt tokens per request
-                {"threshold": float("inf"), "input": 4.00, "output": 18.00, "cached": 0.40},
-            ],
-        },
-        # Provider-prefixed aliases (same rates as canonical Gemini 3 Pro Preview)
-        "gemini/gemini-3-pro-preview": {
-            "tiers": [
-                {"threshold": 200_000, "input": 2.00, "output": 12.00, "cached": 0.20},
-                {"threshold": float("inf"), "input": 4.00, "output": 18.00, "cached": 0.40},
-            ],
-        },
-        "gemini-3.1-pro-preview": {
-            "tiers": [
-                {"threshold": 200_000, "input": 2.00, "output": 12.00, "cached": 0.20},
-                {"threshold": float("inf"), "input": 4.00, "output": 18.00, "cached": 0.40},
-            ],
-        },
-        "gemini/gemini-3.1-pro-preview": {
-            "tiers": [
-                {"threshold": 200_000, "input": 2.00, "output": 12.00, "cached": 0.20},
-                {"threshold": float("inf"), "input": 4.00, "output": 18.00, "cached": 0.40},
-            ],
-        },
-        # Gemini 2.5 series
-        "gemini-2.5-flash": {"input": 0.30, "output": 2.50, "cached": 0.03},
-        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40, "cached": 0.01},
-        "gemini-2.5-pro": {"input": 1.25, "output": 10.00, "cached": 0.125},
-        # Gemini 1.5 series (legacy)
-        "gemini-1.5-flash": {"input": 0.075, "output": 0.30, "cached": 0.01875},
-        "gemini-1.5-pro": {"input": 1.25, "output": 5.00, "cached": 0.3125},
-    }
+    # Pricing imported from harness.e2e.pricing (single source of truth).
 
     def extract_trace(self, container_name: str, output_dir: Path) -> bool:
         """Extract Gemini execution trace.
@@ -685,35 +642,9 @@ class GeminiLogParser(AgentLogParser):
         logger.debug(f"Parsed {len(json_objects)} JSON objects from stdout")
         return json_objects
 
-    @staticmethod
-    def _resolve_pricing(pricing: dict, prompt_tokens: int | None) -> dict:
-        """Resolve tiered pricing to a flat {input, output, cached} dict.
-
-        For models with "tiers", select the tier whose threshold >= prompt_tokens.
-        For flat-pricing models, return as-is.
-
-        Args:
-            pricing: Entry from TOKEN_PRICING (may contain "tiers" or flat keys).
-            prompt_tokens: Total prompt tokens for this request (input + cached).
-                If None, the lowest tier (cheapest) is used as a conservative default.
-
-        Returns:
-            Dict with "input", "output", "cached" rates.
-        """
-        tiers = pricing.get("tiers")
-        if not tiers:
-            return pricing
-        pt = prompt_tokens if prompt_tokens is not None else 0
-        for tier in tiers:
-            if pt <= tier["threshold"]:
-                return tier
-        # Fallback to last (highest) tier
-        return tiers[-1]
-
     def _has_tiered_pricing(self, model: str) -> bool:
         """Check if a model uses tiered pricing."""
-        pricing = self.TOKEN_PRICING.get(model, {})
-        return "tiers" in pricing
+        return _has_tiered_pricing_shared(model)
 
     def _calculate_cost(
         self,
@@ -737,14 +668,10 @@ class GeminiLogParser(AgentLogParser):
         Returns:
             Estimated cost in USD
         """
-        # Default pricing if model not found (gemini-3-flash-preview defaults)
-        default_pricing = {"input": 0.50, "output": 3.00, "cached": 0.05}
-        pricing = self.TOKEN_PRICING.get(model, default_pricing)
-        rates = self._resolve_pricing(pricing, prompt_tokens)
-
-        input_cost = (input_tokens / 1_000_000) * rates["input"]
-        cached_cost = (cached_tokens / 1_000_000) * rates.get("cached", rates["input"] * 0.1)
-        output_cost = (output_tokens / 1_000_000) * rates["output"]
+        rates = _resolve_pricing_shared(model, prompt_tokens=prompt_tokens)
+        input_cost = (input_tokens / 1_000_000) * rates.get("input", 0)
+        cached_cost = (cached_tokens / 1_000_000) * rates.get("cache_read", rates.get("input", 0) * 0.1)
+        output_cost = (output_tokens / 1_000_000) * rates.get("output", 0)
         return input_cost + cached_cost + output_cost
 
     def _merge_stats(self, stdout_stats: Dict, session_stats: Dict) -> Dict:

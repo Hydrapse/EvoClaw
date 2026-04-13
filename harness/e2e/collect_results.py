@@ -34,116 +34,8 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple, Optional
 
 
-# Canonical pricing per model family (USD per million tokens).
-# Used as fallback when Claude Code's internal pricing table assigns
-# incorrect prices to newer model versions within the same family
-# (e.g., sonnet-4.6 charged at $5/$25 instead of $3/$15).
-MODEL_FAMILY_PRICING = {
-    "haiku": {
-        "input": 1.0,
-        "output": 5.0,
-        "cache_read": 0.10,
-        "cache_write": 1.25,
-    },
-    "sonnet": {
-        "input": 3.0,
-        "output": 15.0,
-        "cache_read": 0.30,
-        "cache_write": 3.75,
-    },
-    "opus": {
-        "input": 5.0,
-        "output": 25.0,
-        "cache_read": 0.50,
-        "cache_write": 6.25,
-    },
-    # Z.AI GLM models (official z.ai pricing)
-    "glm-5.1": {
-        "input": 1.4,
-        "output": 4.4,
-        "cache_read": 0.26,
-        "cache_write": 1.4,
-    },
-    "glm-5": {
-        "input": 1.0,
-        "output": 3.2,
-        "cache_read": 0.20,
-        "cache_write": 1.0,
-    },
-    "glm-4.7": {
-        "input": 0.5,
-        "output": 2.0,
-        "cache_read": 0.10,
-        "cache_write": 0.5,
-    },
-    "glm-4.5-air": {
-        "input": 0.2,
-        "output": 1.1,
-        "cache_read": 0.03,
-        "cache_write": 0.2,
-    },
-}
-
-
-def _detect_model_family(model_id: str) -> Optional[str]:
-    """Detect model family from model ID string.
-
-    Examples:
-        claude-haiku-4-5-20251001 → haiku
-        claude-sonnet-4-5-20250929 → sonnet
-        claude-sonnet-4-6 → sonnet
-        claude-opus-4-6 → opus
-        glm-5.1 → glm-5.1
-        glm-5 → glm-5
-    """
-    model_lower = model_id.lower()
-    for family in ["haiku", "sonnet", "opus"]:
-        if family in model_lower:
-            return family
-    # GLM models: match most specific first (glm-5.1 before glm-5)
-    for glm_family in ["glm-5.1", "glm-5", "glm-4.7", "glm-4.5-air"]:
-        if glm_family in model_lower:
-            return glm_family
-    return None
-
-
-def _calculate_cost_from_tokens(usage: Dict, pricing: Dict) -> float:
-    """Calculate cost from token counts and pricing."""
-    return (
-        usage.get("inputTokens", 0) * pricing["input"] / 1e6
-        + usage.get("outputTokens", 0) * pricing["output"] / 1e6
-        + usage.get("cacheReadInputTokens", 0) * pricing["cache_read"] / 1e6
-        + usage.get("cacheCreationInputTokens", 0) * pricing["cache_write"] / 1e6
-    )
-
-
-def recalculate_cost_from_model_usage(model_usage: Dict) -> Optional[float]:
-    """Recalculate total cost from modelUsage using canonical family pricing.
-
-    For each model in modelUsage:
-    - Detect its family (haiku/sonnet/opus)
-    - Recalculate cost using canonical family pricing
-    - If family is unknown, keep the original costUSD
-
-    Returns recalculated total cost, or None if modelUsage is empty/missing.
-    """
-    if not model_usage:
-        return None
-
-    total_cost = 0.0
-    for model_id, usage in model_usage.items():
-        if not isinstance(usage, dict):
-            continue
-
-        family = _detect_model_family(model_id)
-        if family is None:
-            # Unknown family - keep original cost
-            total_cost += usage.get("costUSD", 0)
-            continue
-
-        total_cost += _calculate_cost_from_tokens(usage, MODEL_FAMILY_PRICING[family])
-
-    return total_cost
+# Pricing is centralized in harness.e2e.pricing (single source of truth).
+from harness.e2e.pricing import calculate_cost_from_model_usage as recalculate_cost_from_model_usage
 
 
 def load_non_graded_milestones(workspace_root: Path) -> Set[str]:
@@ -395,67 +287,105 @@ def load_e2e_trial_submission_counts(workspace_root: Path, trial: str) -> tuple[
         return 0, 0
 
 
+def _load_e2e_stats(workspace_root: Path, trial: str) -> Optional[Dict]:
+    """Load stats from agent_stats.json, falling back to live agent_stdout.txt.
+
+    agent_stats.json is written once at trial cleanup.  While a trial is still
+    running it does not exist, so we fall back to parsing agent_stdout.txt
+    (which receives one JSON line per completed session) for live cost/turns.
+    """
+    trial_dir = workspace_root / "e2e_trial" / trial
+    stats_path = trial_dir / "agent_stats.json"
+
+    if stats_path.exists():
+        try:
+            with open(stats_path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # Fallback: parse agent_stdout.txt for live stats
+    stdout_path = trial_dir / "log" / "agent_stdout.txt"
+    if not stdout_path.exists():
+        return None
+    try:
+        total_cost = 0.0
+        total_turns = 0
+        model_usage: Dict[str, Dict] = {}
+        with open(stdout_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "total_cost_usd" not in data and "num_turns" not in data:
+                    continue
+                total_cost += data.get("total_cost_usd", 0)
+                total_turns += data.get("num_turns", 0)
+                for model, usage in data.get("modelUsage", {}).items():
+                    if not isinstance(usage, dict):
+                        continue
+                    if model not in model_usage:
+                        model_usage[model] = {}
+                    for key, val in usage.items():
+                        if isinstance(val, (int, float)):
+                            model_usage[model][key] = model_usage[model].get(key, 0) + val
+        if total_turns == 0 and not model_usage:
+            return None
+        return {
+            "summary": {"total_cost_usd": total_cost, "total_turns": total_turns},
+            "modelUsage": model_usage,
+            "_live": True,  # marker: parsed from stdout, not agent_stats
+        }
+    except Exception:
+        return None
+
+
 def load_e2e_trial_cost(workspace_root: Path, trial: str) -> Optional[float]:
-    """Load total cost from e2e trial's agent_stats.json.
+    """Load total cost from agent_stats.json or live agent_stdout.txt.
 
-    For claude-code trials: recalculates from modelUsage with canonical family
-    pricing, to correct for newer model versions that may have incorrect
-    internal pricing in Claude Code's billing.
-
-    For openhands trials: uses litellm-computed costUSD directly, which is
-    already accurate for all models.
+    For claude-code trials: recalculates from modelUsage with canonical
+    pricing (corrects Claude Code CLI's wrong rates for non-Claude models).
 
     Returns total cost in USD or None if not available.
     """
-    stats_path = workspace_root / "e2e_trial" / trial / "agent_stats.json"
-    if not stats_path.exists():
+    stats = _load_e2e_stats(workspace_root, trial)
+    if stats is None:
         return None
     try:
-        with open(stats_path) as f:
-            stats = json.load(f)
-
-            # Only recalculate for claude-code trials (internal pricing may be wrong)
-            # For openhands trials, litellm cost is already accurate
-            if "claude-code" in trial:
-                cost = recalculate_cost_from_model_usage(stats.get("modelUsage", {}))
-                if cost is not None:
-                    return cost
-
-            return stats.get("summary", {}).get("total_cost_usd")
+        if "claude-code" in trial:
+            cost = recalculate_cost_from_model_usage(stats.get("modelUsage", {}))
+            if cost is not None:
+                return cost
+        return stats.get("summary", {}).get("total_cost_usd")
     except Exception:
         return None
 
 
 def load_e2e_trial_turns(workspace_root: Path, trial: str) -> Optional[int]:
-    """Load total turns from e2e trial's agent_stats.json.
-
-    Returns total turns or None if not available.
-    """
-    stats_path = workspace_root / "e2e_trial" / trial / "agent_stats.json"
-    if not stats_path.exists():
+    """Load total turns from agent_stats.json or live agent_stdout.txt."""
+    stats = _load_e2e_stats(workspace_root, trial)
+    if stats is None:
         return None
     try:
-        with open(stats_path) as f:
-            stats = json.load(f)
-            return stats.get("summary", {}).get("total_turns")
+        return stats.get("summary", {}).get("total_turns")
     except Exception:
         return None
 
 
 def load_e2e_trial_output_tokens(workspace_root: Path, trial: str) -> Optional[int]:
-    """Load total output tokens from e2e trial's agent_stats.json.
+    """Load total output tokens from agent_stats.json or live agent_stdout.txt.
 
     Sums outputTokens + thoughtsTokens (Gemini) + reasoningOutputTokens (Codex)
     + reasoningTokens (OpenHands) across all models in modelUsage.
-
-    Returns total output tokens or None if not available.
     """
-    stats_path = workspace_root / "e2e_trial" / trial / "agent_stats.json"
-    if not stats_path.exists():
+    stats = _load_e2e_stats(workspace_root, trial)
+    if stats is None:
         return None
     try:
-        with open(stats_path) as f:
-            stats = json.load(f)
         model_usage = stats.get("modelUsage", {})
         if not model_usage:
             return None

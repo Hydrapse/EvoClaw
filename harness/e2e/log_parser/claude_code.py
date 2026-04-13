@@ -10,6 +10,13 @@ from typing import Any, Dict, List, Optional
 
 from harness.e2e.log_parser.base import AgentLogParser, register_parser
 from harness.e2e.log_parser.models import NativeUsageUnit, ToolCallRecord
+from harness.e2e.pricing import (
+    MODEL_PRICING,
+    calculate_cost,
+    calculate_cost_from_model_usage,
+    is_non_claude_model,
+    resolve_pricing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,68 +31,8 @@ class ClaudeCodeLogParser(AgentLogParser):
     CLAUDE_HOME = "/home/fakeroot/.claude"
     PROJECTS_DIR = f"{CLAUDE_HOME}/projects"
 
-    # Anthropic-style token pricing (USD / 1M tokens).
-    # Cache write multipliers:
-    # - 5m write: 1.25x input
-    # - 1h write: 2.00x input
-    # Anthropic pricing as of 2026-03.
-    # Opus 4.5/4.6: $5/$25;  Opus 4.0/4.1 (legacy): $15/$75
-    # Sonnet 4.x:   $3/$15
-    TOKEN_PRICING = {
-        "claude-sonnet": {
-            "input": 3.0,
-            "output": 15.0,
-            "cache_read": 0.3,
-            "cache_write_5m": 3.75,
-            "cache_write_1h": 6.0,
-        },
-        "claude-opus": {
-            "input": 5.0,
-            "output": 25.0,
-            "cache_read": 0.5,
-            "cache_write_5m": 6.25,
-            "cache_write_1h": 10.0,
-        },
-        "claude-haiku": {
-            "input": 1.0,
-            "output": 5.0,
-            "cache_read": 0.1,
-            "cache_write_5m": 1.25,
-            "cache_write_1h": 2.0,
-        },
-        # Z.AI GLM models (official z.ai pricing)
-        "glm-5": {
-            "input": 1.0,
-            "output": 3.2,
-            "cache_read": 0.2,
-            "cache_write_5m": 1.0,
-            "cache_write_1h": 1.0,
-        },
-        "glm-5.1": {
-            "input": 1.4,
-            "output": 4.4,
-            "cache_read": 0.26,
-            "cache_write_5m": 1.4,
-            "cache_write_1h": 1.4,
-        },
-        "glm-4.7": {
-            "input": 0.5,
-            "output": 2.0,
-            "cache_read": 0.1,
-            "cache_write_5m": 0.5,
-            "cache_write_1h": 0.5,
-        },
-        # glm-4.5-air: cheaper variant. open.bigmodel.cn silently aliases
-        # claude-haiku-* model requests to glm-4.5-air, so we remap haiku
-        # token usage to this pricing when re-evaluating bigmodel trials.
-        "glm-4.5-air": {
-            "input": 0.2,
-            "output": 1.1,
-            "cache_read": 0.03,
-            "cache_write_5m": 0.2,
-            "cache_write_1h": 0.2,
-        },
-    }
+    # Pricing imported from harness.e2e.pricing (single source of truth).
+    TOKEN_PRICING = MODEL_PRICING
 
     def extract_raw_logs(
         self,
@@ -162,21 +109,7 @@ class ClaudeCodeLogParser(AgentLogParser):
         return all_calls
 
     def _resolve_pricing(self, model: str) -> Dict[str, float]:
-        model_l = (model or "").lower()
-        if "opus" in model_l:
-            return self.TOKEN_PRICING["claude-opus"]
-        if "haiku" in model_l:
-            return self.TOKEN_PRICING.get("claude-haiku", self.TOKEN_PRICING["claude-sonnet"])
-        # Z.AI GLM models
-        if "glm-5.1" in model_l:
-            return self.TOKEN_PRICING["glm-5.1"]
-        if "glm-5" in model_l:
-            return self.TOKEN_PRICING["glm-5"]
-        if "glm-4.7" in model_l:
-            return self.TOKEN_PRICING["glm-4.7"]
-        if "glm-4.5-air" in model_l:
-            return self.TOKEN_PRICING["glm-4.5-air"]
-        return self.TOKEN_PRICING["claude-sonnet"]
+        return resolve_pricing(model)
 
     def _calculate_message_cost(
         self,
@@ -187,13 +120,14 @@ class ClaudeCodeLogParser(AgentLogParser):
         cache_creation_5m_tokens: int,
         cache_creation_1h_tokens: int,
     ) -> float:
-        pricing = self._resolve_pricing(model)
-        input_cost = (input_tokens / 1_000_000) * pricing["input"]
-        output_cost = (output_tokens / 1_000_000) * pricing["output"]
-        cache_read_cost = (cache_read_tokens / 1_000_000) * pricing["cache_read"]
-        cache_write_5m_cost = (cache_creation_5m_tokens / 1_000_000) * pricing["cache_write_5m"]
-        cache_write_1h_cost = (cache_creation_1h_tokens / 1_000_000) * pricing["cache_write_1h"]
-        return input_cost + output_cost + cache_read_cost + cache_write_5m_cost + cache_write_1h_cost
+        return calculate_cost(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_5m_tokens=cache_creation_5m_tokens,
+            cache_write_1h_tokens=cache_creation_1h_tokens,
+        )
 
     def parse_native_usage_units(
         self,
@@ -559,23 +493,12 @@ class ClaudeCodeLogParser(AgentLogParser):
                 )
                 total_turns = jsonl_turns
 
-        # Recalculate cost for non-Claude models using our own pricing table.
+        # Recalculate cost for non-Claude models using canonical pricing.
         # Claude Code CLI only knows Anthropic pricing and applies Sonnet rates
         # to unknown models, producing inflated cost figures.
-        non_claude_models = [m for m in model_usage_dict if not m.startswith("claude")]
+        non_claude_models = [m for m in model_usage_dict if is_non_claude_model(m)]
         if non_claude_models:
-            recalc_cost = 0.0
-            for model, usage in model_usage_dict.items():
-                if not isinstance(usage, dict):
-                    continue
-                recalc_cost += self._calculate_message_cost(
-                    model=model,
-                    input_tokens=usage.get("inputTokens", 0),
-                    output_tokens=usage.get("outputTokens", 0),
-                    cache_read_tokens=usage.get("cacheReadInputTokens", 0),
-                    cache_creation_5m_tokens=usage.get("cacheCreationInputTokens", 0),
-                    cache_creation_1h_tokens=0,
-                )
+            recalc_cost = calculate_cost_from_model_usage(model_usage_dict) or 0.0
             logger.info(
                 f"Non-Claude model detected ({', '.join(non_claude_models)}); "
                 f"recalculated cost: ${recalc_cost:.2f} (CLI reported: ${total_cost:.2f})"

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from harness.e2e.log_parser.base import AgentLogParser, register_parser
 from harness.e2e.log_parser.models import NativeUsageUnit, ToolCallRecord, TrialStats
+from harness.e2e.pricing import resolve_pricing as _resolve_pricing_shared
 
 logger = logging.getLogger(__name__)
 
@@ -35,29 +36,8 @@ class OpenHandsLogParser(AgentLogParser):
     OPENHANDS_HOME = "/home/fakeroot/.openhands"
     CONVERSATIONS_DIR = f"{OPENHANDS_HOME}/conversations"
 
-    # Token pricing per 1M tokens (varies by model via LiteLLM proxy)
-    # These are estimates - actual costs depend on the underlying model
-    TOKEN_PRICING = {
-        # LiteLLM proxy models (mapped to underlying model costs)
-        "litellm_proxy/gemini-3-flash-preview": {"input": 0.075, "output": 0.30},
-        "litellm_proxy/claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-        "litellm_proxy/claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
-        "litellm_proxy/gpt-4o": {"input": 2.50, "output": 10.0},
-        "litellm_proxy/gpt-4o-mini": {"input": 0.15, "output": 0.60},
-        # Z.AI GLM models (official z.ai pricing)
-        "litellm_proxy/glm-5": {"input": 1.0, "output": 3.2, "cache_read": 0.2},
-        "litellm_proxy/glm-5-turbo": {"input": 1.2, "output": 4.0, "cache_read": 0.24},
-        "litellm_proxy/glm-5.1": {"input": 1.4, "output": 4.4, "cache_read": 0.28},
-        "litellm_proxy/glm-4.7": {"input": 0.5, "output": 2.0, "cache_read": 0.1},
-        # Direct model names
-        "gemini-3-flash-preview": {"input": 0.075, "output": 0.30},
-        "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-        "gpt-4o": {"input": 2.50, "output": 10.0},
-        "glm-5": {"input": 1.0, "output": 3.2, "cache_read": 0.2},
-        "glm-5-turbo": {"input": 1.2, "output": 4.0, "cache_read": 0.24},
-        "glm-5.1": {"input": 1.4, "output": 4.4, "cache_read": 0.28},
-        "glm-4.7": {"input": 0.5, "output": 2.0, "cache_read": 0.1},
-    }
+    # Pricing imported from harness.e2e.pricing (single source of truth).
+    # resolve_pricing() handles litellm_proxy/ prefix stripping automatically.
 
     # Action types that map to tool calls
     ACTION_TYPES = {
@@ -677,12 +657,11 @@ class OpenHandsLogParser(AgentLogParser):
         Returns:
             Estimated cost in USD
         """
-        # Default pricing if model not found
-        pricing = self.TOKEN_PRICING.get(model, {"input": 0.075, "output": 0.30})
-        input_cost = (input_tokens / 1_000_000) * pricing["input"]
-        output_cost = (output_tokens / 1_000_000) * pricing["output"]
-        cache_read_cost = (cache_read_tokens / 1_000_000) * pricing.get(
-            "cache_read", pricing["input"] * 0.2
+        rates = _resolve_pricing_shared(model)
+        input_cost = (input_tokens / 1_000_000) * rates.get("input", 0)
+        output_cost = (output_tokens / 1_000_000) * rates.get("output", 0)
+        cache_read_cost = (cache_read_tokens / 1_000_000) * rates.get(
+            "cache_read", rates.get("input", 0) * 0.2
         )
         return input_cost + output_cost + cache_read_cost
 
@@ -963,11 +942,6 @@ class OpenHandsLogParser(AgentLogParser):
                     recalc_cost = self._calculate_cost(
                         model_name_raw, non_cached_input, final_output, final_cache
                     )
-                    # Also try with stripped name
-                    if model_name_raw not in self.TOKEN_PRICING and model_name in self.TOKEN_PRICING:
-                        recalc_cost = self._calculate_cost(
-                            model_name, non_cached_input, final_output, final_cache
-                        )
 
                     total_cost += recalc_cost
 
