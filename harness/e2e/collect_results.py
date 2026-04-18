@@ -1533,17 +1533,25 @@ def _load_trial_config(repo_roots: Dict[str, Path], trial: str) -> Dict[str, str
                 with open(meta_path) as f:
                     meta = _json.load(f)
                 # Resolve effective reasoning effort:
-                # New metadata has the resolved value; old metadata may have null
+                # If metadata.reasoning_effort is None it means the harness did
+                # not pass --effort to the CLI — the agent uses its built-in
+                # default, which depends on both agent and model.
                 effort = meta.get("reasoning_effort")
                 if effort is None:
-                    # Fallback for old metadata that stored null instead of effective value
                     agent = meta.get("agent_name", "")
-                    _effort_defaults = {
-                        "claude-code": "high",
-                        "codex": "xhigh",
-                        "openhands": "high",  # CLI mode default
-                    }
-                    effort = _effort_defaults.get(agent)
+                    model = (meta.get("model") or "").lower()
+                    # Per Anthropic docs (code.claude.com/docs/en/model-config):
+                    # opus-4-7 defaults to xhigh; opus-4-6/sonnet-4-6 default
+                    # to high (API/Enterprise tier).
+                    if agent == "claude-code":
+                        if "opus-4-7" in model:
+                            effort = "xhigh"
+                        else:
+                            effort = "high"
+                    elif agent == "codex":
+                        effort = "xhigh"
+                    elif agent == "openhands":
+                        effort = "high"  # CLI mode default
 
                 # Detect context window from agent_stats.json modelUsage.
                 # Codex CLI reports the *compressed* context window (95% of the
@@ -1654,6 +1662,7 @@ def print_compact_table(
     total_resolved = 0
     total_graded = 0
     total_score = 0.0
+    total_resolve_pct = 0.0
     n_valid = 0
 
     for s in summaries:
@@ -1676,6 +1685,7 @@ def print_compact_table(
             total_resolved += s['resolved']
             total_graded += s['graded']
             total_score += s['score_reliable']
+            total_resolve_pct += s['resolve_pct']
             n_valid += 1
 
         print(
@@ -1683,11 +1693,14 @@ def print_compact_table(
             f"{resolve_str:>{resolve_w}}  {status_str}"
         )
 
-    # Total row
+    # Total row — Score and Resolve both use macro average (mean of per-repo
+    # rates) for consistency with print_full_table; counts in parens are the
+    # underlying micro-aggregate (sum across repos).
     print("  " + "─" * 74)
-    if n_valid > 0 and total_graded > 0:
+    if n_valid > 0:
         avg_score = f"{total_score / n_valid:.1f}%"
-        total_resolve = f"{total_resolved * 100 / total_graded:.0f}% ({total_resolved}/{total_graded})"
+        avg_resolve_pct = total_resolve_pct / n_valid
+        total_resolve = f"{avg_resolve_pct:.0f}% ({total_resolved}/{total_graded})"
     else:
         avg_score = "--"
         total_resolve = "--"

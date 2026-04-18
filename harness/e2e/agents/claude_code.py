@@ -28,13 +28,14 @@ class ClaudeCodeFramework(AgentFramework):
     FRAMEWORK_NAME = "claude-code"
 
     # Mapping from harness reasoning effort levels to Claude Code CLI --effort values.
-    # Claude Code accepts: low, medium, high, max
-    # Harness uses: low, medium, high, xhigh
+    # Claude Code accepts: low, medium, high, xhigh, max.
+    # Harness uses: low, medium, high, xhigh, max (pass-through).
     EFFORT_MAP = {
         "low": "low",
         "medium": "medium",
         "high": "high",
-        "xhigh": "max",
+        "xhigh": "xhigh",
+        "max": "max",
     }
 
     def __init__(
@@ -56,20 +57,33 @@ class ClaudeCodeFramework(AgentFramework):
         """
         self._api_key = api_key or os.environ.get("UNIFIED_API_KEY")
         self._base_url = base_url or os.environ.get("UNIFIED_BASE_URL")
-        self._reasoning_effort = reasoning_effort or "high"
+        # None means "don't set anything" — let opus-4-7 use its own default
+        # (xhigh) rather than forcing "high". Forcing "high" also triggered
+        # claude-code #48051 where the CLI-level setting runs as medium.
+        self._reasoning_effort = reasoning_effort
         self._default_haiku_model = os.environ.get("UNIFIED_DEFAULT_HAIKU_MODEL")
 
     def get_effective_reasoning_effort(self) -> Optional[str]:
-        """Return effective reasoning effort (default: high)."""
+        """Return effective reasoning effort, or None if unset (model default)."""
         return self._reasoning_effort
 
     def _build_effort_args(self) -> List[str]:
         """Return Claude Code CLI args for reasoning effort.
 
         Maps harness reasoning effort levels to Claude Code --effort values.
+        Unknown effort values log a warning and are dropped (CLI default used)
+        — they previously failed silently, which masked a serious misconfig.
         """
-        if self._reasoning_effort and self._reasoning_effort in self.EFFORT_MAP:
+        if not self._reasoning_effort:
+            return []
+        if self._reasoning_effort in self.EFFORT_MAP:
             return ["--effort", self.EFFORT_MAP[self._reasoning_effort]]
+        import logging
+        logging.getLogger(__name__).warning(
+            "Unknown reasoning_effort '%s' — dropped, CLI default used. "
+            "Valid values: %s",
+            self._reasoning_effort, sorted(self.EFFORT_MAP.keys()),
+        )
         return []
 
     def get_container_env_vars(self) -> List[str]:
@@ -89,6 +103,14 @@ class ClaudeCodeFramework(AgentFramework):
             env_vars.extend(["-e", f"ANTHROPIC_BASE_URL={self._base_url}"])
         if self._default_haiku_model:
             env_vars.extend(["-e", f"ANTHROPIC_DEFAULT_HAIKU_MODEL={self._default_haiku_model}"])
+        # Belt-and-suspenders: also set CLAUDE_CODE_EFFORT_LEVEL alongside the
+        # `--effort` CLI flag. Workaround for github.com/anthropics/claude-code
+        # issue #41028 where the CLI flag is parsed but not propagated to the
+        # API request — env var path is reliable.
+        if self._reasoning_effort and self._reasoning_effort in self.EFFORT_MAP:
+            env_vars.extend([
+                "-e", f"CLAUDE_CODE_EFFORT_LEVEL={self.EFFORT_MAP[self._reasoning_effort]}",
+            ])
         return env_vars
 
     def get_container_mounts(self) -> List[str]:

@@ -75,3 +75,12 @@ retry_and_timing:
   # - start_new_session: clear persisted session and continue with a fresh session
   resume_no_progress_retry_limit: 3
   resume_no_progress_policy: exit
+
+  # Within a single worker invocation, when the initial `claude --resume <id>`
+  # subprocess fails for a generic reason (non-zero exit, no fatal/auth/rate-
+  # limit/invalid-session signal), retry up to this many extra times before
+  # invalidating the session and starting fresh. Sleeps `recovery_wait_seconds`
+  # between attempts. Helps recover from TCP wedges and externally-killed
+  # claude processes where the session itself is healthy. Total attempts =
+  # 1 + this. Set to 0 for legacy "one shot then fresh" behavior.
+  resume_subprocess_retry_limit: 3

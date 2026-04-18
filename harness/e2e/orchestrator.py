@@ -202,6 +202,7 @@ class E2EOrchestrator:
         main_branch: str = "main",  # Main branch name from repo config
         drop_params: bool = False,  # Deprecated, use api_router
         api_router: bool = False,  # Deploy claude-code-router-py for API translation
+        reasoning_effort: Optional[str] = None,  # For framework env var injection
     ):
         self.repo_name = repo_name
         self.milestone_version = milestone_version
@@ -212,6 +213,7 @@ class E2EOrchestrator:
         self.workspace_root = workspace_root
         self.agent_name = agent_name
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.repo_src_dirs = repo_src_dirs
         self.test_dirs = test_dirs
         self.main_branch = main_branch
@@ -246,6 +248,7 @@ class E2EOrchestrator:
             e2e_workspace_path=self.e2e_workspace_path,
             agent_framework_name=self.agent_name,  # agent_name is the framework (e.g., "gemini-cli")
             api_router=self.api_router,
+            reasoning_effort=self.reasoning_effort,
         )
 
         # Load config (priority: config_path > trial_root > workspace_root > harness/e2e default)

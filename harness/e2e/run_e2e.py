@@ -39,6 +39,7 @@ import yaml
 from harness.e2e.orchestrator import E2EOrchestrator
 from harness.e2e.agent_runner import E2EAgentRunner
 from harness.e2e.log_parser import get_parser
+from harness.e2e.trial_lock import acquire_trial_lock
 
 logger = logging.getLogger("e2e.runner")
 orchestrator_logger = logging.getLogger("e2e.orchestrator")
@@ -1122,15 +1123,35 @@ class E2ETrialRunner:
             recover_timeout_ms / 1000 / 60,
         )
 
+        # Generic-failure retry budget for the initial resume_session subprocess
+        # (handles transient TCP wedge / externally-killed claude before giving
+        # up on the session). See e2e_config.yaml: resume_subprocess_retry_limit.
+        resume_subprocess_retry_limit = int(getattr(config, "resume_subprocess_retry_limit", 0) or 0)
+        recovery_wait_seconds = int(getattr(config, "recovery_wait_seconds", 60) or 0)
+
         while not dag.is_done() and no_progress_count < max_no_progress_attempts:
             if first_run:
                 if resume_session_first:
-                    logger.info("Attempting to resume previous agent session (first run)...")
-                    orchestrator_logger.info("🔁 Agent resume attempt (first run)")
-                    self.orchestrator._update_task_queue_file(self.orchestrator.trial_root)
-                    success = self.agent_runner.send_recover_message(has_new_tasks=True, timeout_ms=recover_timeout_ms)
-                    if not success:
-                        # Fatal config error - abort immediately
+                    resume_attempt = 0
+                    fall_back_to_fresh = False
+                    success = False
+
+                    while True:
+                        attempt_label = (
+                            "first attempt"
+                            if resume_attempt == 0
+                            else f"retry {resume_attempt}/{resume_subprocess_retry_limit}"
+                        )
+                        logger.info(f"Attempting to resume previous agent session ({attempt_label})...")
+                        orchestrator_logger.info(f"🔁 Agent resume {attempt_label}")
+                        self.orchestrator._update_task_queue_file(self.orchestrator.trial_root)
+                        success = self.agent_runner.send_recover_message(
+                            has_new_tasks=True, timeout_ms=recover_timeout_ms
+                        )
+                        if success:
+                            break
+
+                        # Fatal config error - abort immediately, no retry
                         if self.agent_runner._last_fatal_error:
                             trial_path = self.orchestrator.trial_root
                             logger.error(
@@ -1142,47 +1163,92 @@ class E2ETrialRunner:
                             )
                             _set_last_run_summary("fatal_error")
                             return False
-                        # Check if DAG completed while agent was running - no need to fallback
-                        elif dag.is_done():
+                        # DAG completed during the resume attempt - skip fallback
+                        if dag.is_done():
                             logger.info("Resume failed but DAG is complete - skipping fallback")
-                        elif self.agent_runner._last_model_unavailable:
+                            break
+                        if self.agent_runner._last_model_unavailable:
                             hint = self.agent_runner._last_model_hint or (
                                 f"Repeated 500 errors observed for model '{self.model}'. "
                                 "This may be transient; if persistent, try a different model alias."
                             )
                             logger.error(
-                                "❗ Resume failed with repeated 500 errors; possible model/backend compatibility issue "
-                                "(inferred). %s",
+                                "❗ Resume failed with repeated 500 errors; possible model/backend "
+                                "compatibility issue (inferred). %s",
                                 hint,
                             )
                             orchestrator_logger.error(
-                                "❗ Resume failed with repeated 500 errors; possible model/backend compatibility issue "
-                                "(inferred): %s",
+                                "❗ Resume failed with repeated 500 errors; possible model/backend "
+                                "compatibility issue (inferred): %s",
                                 hint,
                             )
                             _set_last_run_summary("model_unavailable")
                             return False
-                        elif self.agent_runner._last_rate_limit or self.agent_runner._last_auth_error:
-                            # Rate limit or auth error during resume - don't destroy session,
-                            # let the main failure handler (line 948+) deal with sleep/retry
+                        if self.agent_runner._last_rate_limit or self.agent_runner._last_auth_error:
+                            # Rate limit / auth error - don't destroy session, let the main failure
+                            # handler downstream deal with sleep/retry. Don't burn retry budget on it.
                             logger.warning(
-                                "Resume failed due to rate limit / auth error - skipping fallback to preserve session"
+                                "Resume failed due to rate limit / auth error - "
+                                "skipping fallback to preserve session"
                             )
-                            orchestrator_logger.info("⏳ Resume hit rate limit / auth error - will sleep and retry")
-                        else:
-                            if self.agent_runner._last_invalid_session:
+                            orchestrator_logger.info(
+                                "⏳ Resume hit rate limit / auth error - will sleep and retry"
+                            )
+                            break
+                        if self.agent_runner._last_invalid_session:
+                            # Session genuinely doesn't exist anymore — retrying same id won't help.
+                            logger.warning(
+                                "Resume session ID is invalid/expired, clearing persistent session "
+                                "and starting fresh."
+                            )
+                            orchestrator_logger.info("🧹 Invalid session ID detected; starting new agent session")
+                            fall_back_to_fresh = True
+                            break
+
+                        # Generic failure (non-zero subprocess exit, no specific signal).
+                        # Possibly a transient TCP wedge / externally-killed claude.
+                        # Retry the SAME session id if budget remains.
+                        if resume_attempt < resume_subprocess_retry_limit:
+                            resume_attempt += 1
+                            if recovery_wait_seconds > 0:
                                 logger.warning(
-                                    "Resume session ID is invalid/expired, clearing persistent session and starting fresh."
+                                    "Resume attempt failed (no specific error); sleeping %ds "
+                                    "before retry %d/%d...",
+                                    recovery_wait_seconds,
+                                    resume_attempt,
+                                    resume_subprocess_retry_limit,
                                 )
-                                orchestrator_logger.info("🧹 Invalid session ID detected; starting new agent session")
-                            logger.warning("Resume attempt failed, falling back to a new agent session...")
-                            orchestrator_logger.info("🧹 Clearing persistent session (fallback to new)")
-                            try:
-                                self.agent_runner.invalidate_persistent_session(reason="resume_failure")
-                            except Exception as e:
-                                logger.warning(f"Failed to invalidate persistent session: {e}")
-                            orchestrator_logger.info("🚀 Agent started (fallback new session)")
-                            success = self.agent_runner.run()
+                                orchestrator_logger.warning(
+                                    "⏳ Resume retry %d/%d in %ds",
+                                    resume_attempt,
+                                    resume_subprocess_retry_limit,
+                                    recovery_wait_seconds,
+                                )
+                                time.sleep(recovery_wait_seconds)
+                            continue
+
+                        # Retry budget exhausted → fall back to a fresh session.
+                        logger.warning(
+                            "Resume retries exhausted (%d/%d), falling back to a new agent session...",
+                            resume_attempt,
+                            resume_subprocess_retry_limit,
+                        )
+                        orchestrator_logger.info(
+                            "🧹 Resume retries exhausted (%d/%d); fallback to new session",
+                            resume_attempt,
+                            resume_subprocess_retry_limit,
+                        )
+                        fall_back_to_fresh = True
+                        break
+
+                    if fall_back_to_fresh:
+                        try:
+                            self.agent_runner.invalidate_persistent_session(reason="resume_failure")
+                        except Exception as e:
+                            logger.warning(f"Failed to invalidate persistent session: {e}")
+                        orchestrator_logger.info("🚀 Agent started (fallback new session)")
+                        success = self.agent_runner.run()
+
                     resume_session_first = False  # Only attempt once
                 else:
                     logger.info("Running agent (first run)...")
@@ -1660,6 +1726,12 @@ def _run_resume_mode(args):
     trial_root = args.resume_trial.resolve()
     logger.info(f"Resuming trial from: {trial_root}")
 
+    # Acquire exclusive lock before loading state (works without metadata —
+    # workspace_root is derived from trial_root path: <ws>/e2e_trial/<name>).
+    trial_name = trial_root.name
+    workspace_root_for_lock = trial_root.parent.parent
+    _trial_lock = acquire_trial_lock(workspace_root_for_lock, trial_name, force=args.force)
+
     # Load and validate trial state
     loader = TrialStateLoader(trial_root)
     is_valid, errors = loader.validate()
@@ -1670,7 +1742,6 @@ def _run_resume_mode(args):
         sys.exit(1)
 
     trial_state = loader.load()
-    trial_name = trial_root.name
 
     # Verify container is available
     is_valid, issues = verify_container_for_resume(trial_state.container_name)
@@ -1736,6 +1807,7 @@ def _run_resume_mode(args):
         generated_patterns=generated_patterns,
         modifiable_test_patterns=modifiable_test_patterns,
         api_router=metadata.get("api_router", metadata.get("drop_params", False)),
+        reasoning_effort=metadata.get("reasoning_effort"),
     )
 
     # Prepare agent output directory (reuse existing)
@@ -1818,7 +1890,7 @@ Example:
         "--reasoning-effort",
         default=None,
         choices=["low", "medium", "high", "xhigh", "max"],
-        help="Reasoning effort level (default: per-agent, codex=xhigh, claude-code=high)",
+        help="Reasoning effort (low|medium|high|xhigh|max). Default: unset → agent uses model's built-in default (e.g. opus-4-7=xhigh, sonnet/opus-4-6=high). For claude-code, also passed via CLAUDE_CODE_EFFORT_LEVEL env to work around upstream bug #41028.",
     )
 
     # Config
@@ -1940,10 +2012,30 @@ Example:
     trial_name = get_next_trial_name(trial_base_name, e2e_trial_dir)
     trial_root = e2e_trial_dir / trial_name
 
+    # Acquire exclusive lock on (workspace_root, trial_name) before any
+    # state-modifying work. Bound to a local so the fd stays open for the
+    # life of the process; the kernel releases the flock on exit.
+    _trial_lock = acquire_trial_lock(workspace_root, trial_name, force=args.force)
+
     # Refuse to overwrite an existing trial directory (prevents silent data loss)
     if trial_root.exists() and any(trial_root.iterdir()):
         if args.force:
-            logger.warning(f"--force specified: reusing existing trial directory '{trial_root}'")
+            logger.warning(f"--force: wiping existing trial directory '{trial_root}'")
+            import shutil
+            try:
+                shutil.rmtree(trial_root)
+            except (PermissionError, OSError):
+                # Docker-created files may be root-owned (PermissionError) or
+                # block rmdir of mount points like testbed/node_modules
+                # (OSError ENOTEMPTY); fall back to a container that runs as
+                # root to clear them.
+                import subprocess as _sp
+                _sp.run(
+                    ["docker", "run", "--rm", "-v", f"{trial_root}:/data", "alpine", "rm", "-rf", "/data"],
+                    capture_output=True, timeout=30,
+                )
+                if trial_root.exists():
+                    shutil.rmtree(trial_root)
         else:
             logger.error(
                 f"Trial directory already exists and is not empty: {trial_root}\n"
@@ -2051,6 +2143,7 @@ Example:
         generated_patterns=generated_patterns,  # Generated code patterns for snapshot inclusion
         modifiable_test_patterns=modifiable_test_patterns,  # Test files agent can modify
         api_router=args.api_router or args.drop_params,
+        reasoning_effort=args.reasoning_effort,
     )
 
     # Prepare agent output directory

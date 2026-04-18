@@ -137,6 +137,7 @@ class ContainerSetup:
         agent_framework_name: str = "claude-code",
         drop_params: bool = False,
         api_router: bool = False,
+        reasoning_effort: Optional[str] = None,
     ):
         """Initialize container setup.
 
@@ -159,7 +160,13 @@ class ContainerSetup:
         self.workdir = workdir
         self.agent_name = agent_name
         self.e2e_workspace_path = Path(e2e_workspace_path) if e2e_workspace_path else None
-        self._framework: AgentFramework = get_agent_framework(agent_framework_name)
+        # Pass reasoning_effort so the framework can inject CLAUDE_CODE_EFFORT_LEVEL
+        # into the container env (workaround for claude-code issue #41028 where
+        # the --effort CLI flag is parsed but not propagated to the API request).
+        framework_kwargs = {}
+        if reasoning_effort:
+            framework_kwargs["reasoning_effort"] = reasoning_effort
+        self._framework: AgentFramework = get_agent_framework(agent_framework_name, **framework_kwargs)
         self.api_router = api_router or drop_params
         self._agent_framework_name = agent_framework_name
 
@@ -686,9 +693,17 @@ print("Container initialization complete!")
 
         logger.info("Python3 not found, attempting to install...")
 
-        # Try apt-get (Debian/Ubuntu) - preserve stderr for debugging
+        # Try apt-get (Debian/Ubuntu) - preserve stderr for debugging.
+        # Some hosts/datacenters block outbound port 80; rewrite Debian/Ubuntu
+        # apt sources to HTTPS so apt-get reaches the mirror via 443 instead.
         install_script = """
 if command -v apt-get >/dev/null 2>&1; then
+    # Rewrite http://*.ubuntu.com / *.debian.org to https:// — port 443 is
+    # commonly reachable when 80 is blocked. Idempotent (sed -i in place).
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+        [ -f "$f" ] || continue
+        sed -i -E 's@http://(archive\\.ubuntu\\.com|security\\.ubuntu\\.com|[a-z0-9.-]*\\.archive\\.ubuntu\\.com|deb\\.debian\\.org|security\\.debian\\.org)@https://\\1@g' "$f" 2>/dev/null || true
+    done
     apt-get update -qq && apt-get install -y -qq python3-minimal
     exit $?
 elif command -v apk >/dev/null 2>&1; then
@@ -930,6 +945,7 @@ echo "Git history truncated successfully"
         logger.info("Applying network lockdown to container...")
 
         # --- Step 1: Install iptables ---
+        # Same HTTPS-rewrite trick as _ensure_python3 (port 80 may be blocked).
         install_result = subprocess.run(
             [
                 "docker",
@@ -937,7 +953,13 @@ echo "Git history truncated successfully"
                 self.container_name,
                 "/bin/sh",
                 "-c",
-                "apt-get update -qq && apt-get install -y -qq iptables",
+                (
+                    "for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do "
+                    "[ -f \"$f\" ] || continue; "
+                    "sed -i -E 's@http://(archive\\.ubuntu\\.com|security\\.ubuntu\\.com|[a-z0-9.-]*\\.archive\\.ubuntu\\.com|deb\\.debian\\.org|security\\.debian\\.org)@https://\\1@g' \"$f\" 2>/dev/null || true; "
+                    "done; "
+                    "apt-get update -qq && apt-get install -y -qq iptables"
+                ),
             ],
             capture_output=True,
             text=True,

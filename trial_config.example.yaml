@@ -10,14 +10,19 @@
 # Path to EvoClaw-data (cloned from HuggingFace)
 data_root: /path/to/EvoClaw-data
 
-# Trial name — used as prefix for all trial directories across repos
+# Trial name. Two forms:
+#   "my_experiment"     → run_all.py picks the latest matching _NNN
+#                         (resume by default; --force wipes that one;
+#                         --new bumps to next _NNN). First run = _001.
+#   "my_experiment_002" → fixed; used as-is by all repos, no suffix logic.
 trial_name: my_experiment
 
 # Agent framework: claude-code | codex | gemini-cli | openhands
 agent: claude-code
 
-# Model identifier
-model: claude-sonnet-4-6
+# Model identifier. For Claude Code, use the bare ID (e.g. claude-opus-4-7)
+# or append [1m] for the 1M-context variant (claude-opus-4-7[1m]).
+model: claude-opus-4-7
 
 # Max agent runtime per repo (seconds)
 timeout: 18000
@@ -34,11 +39,6 @@ timeout: 18000
 #   - navidrome
 #   - ripgrep
 #   - dubbo
-
-# Max number of repos to evaluate in parallel
-# Default: all repos run simultaneously. Uncomment to limit,
-# e.g., if you have limited GPU/memory or API rate limits.
-# max_parallel: 3
 
 # Override the model Claude Code uses for background tasks (skill listing,
 # auto-memory, subagent spawning, context management). By default Claude

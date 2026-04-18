@@ -90,6 +90,8 @@ git clone https://huggingface.co/datasets/hyd2apse/EvoClaw-data
 
 ## 🚀 Usage
 
+> Hand [`docs/running-trials.md`](docs/running-trials.md) to your agent — it has everything needed to launch trials, monitor progress, recover stuck repos autonomously, and manage trial IDs.
+
 **1. Configure** — copy the template and edit:
 
 ```bash
@@ -101,11 +103,10 @@ cp trial_config.example.yaml trial_config.yaml
 data_root: /path/to/EvoClaw-data       # where you cloned the HuggingFace dataset
 trial_name: my_experiment              # name for this evaluation run
 agent: claude-code                     # agent: claude-code | codex | gemini-cli | openhands
-model: claude-opus-4-6                 # model identifier
+model: claude-opus-4-7                 # model identifier (use claude-opus-4-7[1m] for 1M context)
 timeout: 18000                         # optional: max agent runtime per repo (seconds)
 # reasoning_effort: high               # optional: low | medium | high | xhigh | max 
 # repos: [navidrome, ripgrep]          # optional: run only these repos (default: all)
-# max_parallel: 3                      # optional: limit parallel repos (default: all)
 ```
 
 **2. Run** — evaluate across all repos:
@@ -126,9 +127,9 @@ python scripts/run_all.py --config trial_config.yaml
 ./scripts/monitor.sh my_experiment --full          # full table with all columns
 ```
 
-> **Tip:** If a repo's milestones appear stuck (usually due to agent framework memory or network issues), kill that repo's `run_e2e` process and resume with `python -m harness.e2e.run_e2e --resume-trial /path/to/trial_dir`. EvoClaw will continue from the latest checkpoint. Use `--model` to override the model on resume, or `--force` to start a completely fresh trial.
+> **Tip:** `run_all.py` is fire-and-forget — it spawns one detached `run_e2e` per repo and exits immediately (no `nohup` needed). Re-running the same command is the resume operation: each worker holds an `flock` on its trial dir, so the second invocation either takes over only-if-the-first-one-died, or refuses with a clear "owned by PID …" message. Add `--force` to wipe & restart the latest matching `_NNN`, or `--new` to start the next `_NNN` fresh. See [docs/running-trials.md](docs/running-trials.md) for the full behavior matrix.
 
-> See [docs/usage.md](docs/usage.md) for single-repo runs, resume, re-evaluation, result collection, and all CLI arguments.
+> See [docs/running-trials.md](docs/running-trials.md) for the day-to-day operational runbook (launch, monitor, recover from stuck repos), and [docs/advanced.md](docs/advanced.md) for single-repo / single-milestone debugging, result collection, `e2e_config.yaml`, and lock internals.
 
 ## 🔍 Troubleshooting
 
@@ -138,6 +139,8 @@ Below are common issues you may encounter when running evaluations, along with s
 
 Agent containers enforce an iptables-based outbound whitelist — only domains needed for API access and package management are allowed (e.g., `api.anthropic.com`, `registry.npmjs.org`, `pypi.org`). Code hosting sites (GitHub, GitLab, etc.) are explicitly blocked to prevent data leakage. If your setup routes API requests through a custom proxy, make sure the proxy domain is included in `WHITELISTED_DOMAINS` in `harness/e2e/container_setup.py`.
 
+> **Port 80 outbound blocked?** Some hosts/datacenters block plain HTTP. The harness automatically rewrites Debian/Ubuntu apt sources to HTTPS so `apt-get update` reaches mirrors via 443 — no action needed.
+
 **2. Agent exits prematurely before completing all milestones**
 
 Due to LLM capability limitations or agent framework issues, agents may exit without completing all milestones. For example, out of memory, hitting API errors, or getting stuck in implementation loops without submitting. EvoClaw handles this with a built-in resume mechanism that recovers the agent session and continues from where it left off:
@@ -146,7 +149,9 @@ Due to LLM capability limitations or agent framework issues, agents may exit wit
 python -m harness.e2e.run_e2e --resume-trial /path/to/trial_dir
 ```
 
-When possible, the agent resumes within the same session context, preserving its memory of all previous work. If the session becomes unrecoverable (e.g., corrupted state or context overflow after many turns), EvoClaw automatically falls back to a new session. In either case, all prior code changes and git state (commits, tags) are preserved in the container, so the agent can continue from the current codebase state.
+When possible, the agent resumes within the same session context, preserving its memory of all previous work. If the session becomes unrecoverable (e.g., corrupted state or context overflow after many turns), EvoClaw automatically falls back to a new session. In either case, all prior code changes and git state (commits, tags) are preserved inside the container, so the agent can continue from the current codebase state.
+
+> **Resume requires the container to exist.** `/testbed` is not bind-mounted to the host, so `docker rm` destroys all uncommitted code, in-container git history, and the agent's session cache. If the container is gone, only `--force` (full restart from the initial commit) is possible — already-submitted milestones' source snapshots remain in `evaluation/`, but `/testbed` itself reverts to the initial state.
 
 > **Evaluation protocol**: The reported results in the EvoClaw benchmark follow a protocol where trials are resumed until all milestones are submitted and evaluated, unless three consecutive resumes yield no new submissions. We encourage reproducibility studies to follow the same setting.
 

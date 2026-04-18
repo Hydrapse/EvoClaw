@@ -115,6 +115,7 @@ DEFAULT_CONFIG = {
         "recover_message_timeout_seconds": 18000,
         "resume_no_progress_retry_limit": 1,
         "resume_no_progress_policy": "exit",
+        "resume_subprocess_retry_limit": 3,
     },
 }
 
@@ -245,3 +246,23 @@ class E2EConfig:
         - "start_new_session": invalidate persisted session and continue with a new one
         """
         return self.config.get("retry_and_timing", {}).get("resume_no_progress_policy", "exit")
+
+    @property
+    def resume_subprocess_retry_limit(self) -> int:
+        """How many extra times to retry the initial `claude --resume <id>`
+        subprocess call after a generic failure, before invalidating the session
+        and falling back to a fresh one.
+
+        Helps recover from transient issues (TCP wedge, externally-killed
+        claude, brief proxy outage) where the session itself is fine but the
+        subprocess returned non-zero. Each retry sleeps `recovery_wait_seconds`
+        first to give the API a chance to settle.
+
+        Total attempts = 1 + this limit. Set to 0 for legacy behavior
+        (one attempt then immediate fallback).
+
+        Distinct from `resume_no_progress_retry_limit`, which counts CONSECUTIVE
+        worker invocations that exited with no progress (persistent across
+        worker restarts). This one is per-worker, per-subprocess.
+        """
+        return self.config.get("retry_and_timing", {}).get("resume_subprocess_retry_limit", 3)
